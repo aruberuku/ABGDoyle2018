@@ -1,0 +1,2646 @@
+---
+title: "ABGDoyle ML Refresh - XGBoost/SHAP RMX"
+output:
+  html_document:
+    df_print: paged
+---
+# source
+# https://github.com/doylelab/rxnpredict
+============================================================================
+Basically just running the above code, with comments to disect. Then implementing SHAP analytics with comments and speculations.
+Might make for an interesting paper -- esp given the comment/rebuttal spat Doyle et al had with that Chinese author wrt "what" the model is actually predicting.
+SHAP, being an advanced -- almost perfect -- method for transforming a "black box" model into a "white box", could possibly help.
+
+LET'S GO!
+============================================================================
+
+Pacman package intelligently loads and, if necessary, installs packages.
+This improves portability and also speeds up execution as unnecessary installs/loads wont be run.
+The syntax is also cleaner and less tedious than the usual library/require functions.
+
+```{r - packages, include=FALSE}
+# Install packages (if necessary) and load them
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(gplots, 
+               ggplot2, 
+               GGally,
+               caret,
+               ModelMetrics,
+               glmnet,
+               gridExtra,
+               randomForest,
+               scales,
+               arm,
+               corrplot,
+               neuralnet,
+               xgboost,
+               SHAPforxgboost,
+               data.table,
+               magick,
+               tidyverse,
+               plotly,
+               caret,
+               pROC,
+               tableone,
+               viridis
+               )
+
+# Set the working directory to the location of the rxnpredict folder
+#setwd("C:/Users/Derek/Dropbox/rxnpredict")
+setwd("~/RStudioi/ABGDoyle")
+#load
+#load("~/RStudioi/ABGDoyle/backup.RData")
+```
+
+Here, we set up freuquently re/used graphics.
+
+```{r - helper functions, include=FALSE}
+# ============================================================================
+# Helper functions for making heatmaps and histograms
+# ============================================================================
+
+# heatmap
+makeHeatmap1536 <- function(data, labels, filename){
+  color1 <- "white"
+  color2 <- "cornflowerblue"
+  color3 <- "green"
+  colfunc <- colorRampPalette(c(color1, color2, color3))
+  
+  png(filename=filename, width = 1600, height = 1000)
+  heatmap.2(data, trace="none", dendrogram="none", key=FALSE,
+            cellnote=labels, notecol="black", srtCol=0, 
+            notecex=2, cexRow=1.5, cexCol=1.5,
+            lwid=c(0.1, 4), lhei=c(0.2, 4),
+            Rowv=NA, Colv=NA, col=colfunc,
+            labRow=c(1:32), labCol=c(1:48))
+  dev.off()
+}
+
+# histogram
+ggplot() # initialize ggplot object for histogram
+ggHist <- function(data, filename){
+  data <- as.data.frame(unlist(data))
+  colnames(data) <- c("yield")
+  ggplot(data, aes(x=yield)) +
+    geom_histogram(colour = "black", 
+                   fill = "cornflowerblue", 
+                   breaks=seq(0,100,by=5), 
+                   na.rm = TRUE) +
+    labs(x="Yield", y="Count") -> plot_hist
+  # save histogram
+  plot_hist +
+    ggsave(file=filename, width=5, height=3)
+  
+}
+
+#######################################
+# Functions for sorting factor levels #
+# (janhove.github.io)                 #
+#######################################
+
+# Sort factor levels arbitrarily
+sortLvls.fnc <- function(oldFactor, levelOrder) {
+  if(!is.factor(oldFactor)) stop("The variable you want to reorder isn't a factor.")
+  
+  if(!is.numeric(levelOrder)) stop("'order' should be a numeric vector.")
+  
+  if(max(levelOrder) > length(levels(oldFactor))) stop("The largest number in 'order' can't be larger than the number of levels in the factor.")
+  
+  if(length(levelOrder) > length(levels(oldFactor))) stop("You can't have more elements in 'order' than there are levels in the factor.")
+  
+  if(length(levelOrder) == length(levels(oldFactor))) {
+    reorderedFactor <- factor(oldFactor, levels = levels(oldFactor)[levelOrder])
+  }
+  
+  if(length(levelOrder) < length(levels(oldFactor))) {
+    levelOrderAll <- c(levelOrder, (1:length(levels(oldFactor)))[-levelOrder])
+    reorderedFactor <- factor(oldFactor, levels = levels(oldFactor)[levelOrderAll])
+  }
+  
+  return(reorderedFactor)
+}
+
+```
+
+Yield is the primary predictive output being considered.
+It is derived from actual chemical essays processed offplatform (Python?)
+
+```{r - load and prepare yield data (label to be predicted)}
+# ============================================================================
+# Load yield data and stitch it together 
+# ============================================================================
+
+# In my case, there were 3 1536-well plates and the data for each plate
+# was analyzed by quadrant (via 4 384-well plates)
+# make func for portability
+# Plate 1.1
+plate1.1 <- data.table::fread("yield_data/plate1.1.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate1.1_pdt <- plate1.1$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate1.1_pdt))
+dim(plate.data) <- c(24,16)
+plate.data1.1 <- t(plate.data)
+
+# Plate 1.2
+plate1.2 <- data.table::fread("yield_data/plate1.2.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate1.2_pdt <- plate1.2$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate1.2_pdt))
+dim(plate.data) <- c(24,16)
+plate.data1.2 <- t(plate.data)
+
+# Plate 1.3
+plate1.3 <- data.table::fread("yield_data/plate1.3.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate1.3_pdt <- plate1.3$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate1.3_pdt))
+dim(plate.data) <- c(24,16)
+plate.data1.3 <- t(plate.data)
+
+# Plate 1.4
+plate1.4 <- data.table::fread("yield_data/plate1.4.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate1.4_pdt <- plate1.4$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate1.4_pdt))
+dim(plate.data) <- c(24,16)
+plate.data1.4 <- t(plate.data)
+
+# stitch Plate 1 together into one 32x48 matrix
+plate1.top <- cbind(plate.data1.1, plate.data1.2)
+plate1.bottom <- cbind(plate.data1.3, plate.data1.4)
+plate1 <- rbind(plate1.top, plate1.bottom)
+
+# Plate 2.1
+plate2.1 <- data.table::fread("yield_data/plate2.1.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate2.1_pdt <- plate2.1$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate2.1_pdt))
+dim(plate.data) <- c(24,16)
+plate.data2.1 <- t(plate.data)
+
+# Plate 2.2
+plate2.2 <- data.table::fread("yield_data/plate2.2.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate2.2_pdt <- plate2.2$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate2.2_pdt))
+dim(plate.data) <- c(24,16)
+plate.data2.2 <- t(plate.data)
+
+# Plate 2.3
+plate2.3 <- data.table::fread("yield_data/plate2.3.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate2.3_pdt <- plate2.3$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate2.3_pdt))
+dim(plate.data) <- c(24,16)
+plate.data2.3 <- t(plate.data)
+
+# Plate 2.4
+plate2.4 <- data.table::fread("yield_data/plate2.4.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate2.4_pdt <- plate2.4$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate2.4_pdt))
+dim(plate.data) <- c(24,16)
+plate.data2.4 <- t(plate.data)
+
+# stitch Plate 2 together into one 32x48 matrix
+plate2.top <- cbind(plate.data2.1, plate.data2.2)
+plate2.bottom <- cbind(plate.data2.3, plate.data2.4)
+plate2 <- rbind(plate2.top, plate2.bottom)
+
+# Plate 3.1
+plate3.1 <- data.table::fread("yield_data/plate3.1.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate3.1_pdt <- plate3.1$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate3.1_pdt))
+dim(plate.data) <- c(24,16)
+plate.data3.1 <- t(plate.data)
+
+# Plate 3.2
+plate3.2 <- data.table::fread("yield_data/plate3.2.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate3.2_pdt <- plate3.2$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate3.2_pdt))
+dim(plate.data) <- c(24,16)
+plate.data3.2 <- t(plate.data)
+
+# Plate 3.3
+plate3.3 <- data.table::fread("yield_data/plate3.3.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate3.3_pdt <- plate3.3$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate3.3_pdt))
+dim(plate.data) <- c(24,16)
+plate.data3.3 <- t(plate.data)
+
+# Plate 3.4
+plate3.4 <- data.table::fread("yield_data/plate3.4.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate3.4_pdt <- plate3.4$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate3.4_pdt))
+dim(plate.data) <- c(24,16)
+plate.data3.4 <- t(plate.data)
+
+# stitch Plate 3 together into one 32x48 matrix
+plate3.top <- cbind(plate.data3.1, plate.data3.2)
+plate3.bottom <- cbind(plate.data3.3, plate.data3.4)
+plate3 <- rbind(plate3.top, plate3.bottom)
+
+
+```
+
+Simple diagnostics plots for yield.
+Based on heatmaps and histograms.
+
+```{r - diagnostics plots for yield data}
+# ============================================================================
+# Make heatmaps and histograms 
+# ============================================================================
+
+# Plate 1 heatmap and histogram
+plate1.txt <- format(round(plate1, 0), nsmall = 0)
+makeHeatmap1536(plate1, plate1.txt, "yield_data/plate1_heatmap.png") %>% tryCatch(error = function(e) NULL)
+plate1 <- as.data.frame(plate1)
+ggHist(plate1, "yield_data/plate1_histogram.png") %>% tryCatch(error = function(e) NULL)
+
+# Plate 2 heatmap and histogram
+plate2.txt <- format(round(plate2, 0), nsmall = 0)
+makeHeatmap1536(plate2, plate2.txt, "yield_data/plate2_heatmap.png") %>% tryCatch(error = function(e) NULL)
+plate2 <- as.data.frame(plate2)
+ggHist(plate2, "yield_data/plate2_histogram.png")  %>% tryCatch(error = function(e) NULL)
+
+# Plate 3 heatmap and histogram
+plate3.txt <- format(round(plate3, 0), nsmall = 0)
+makeHeatmap1536(plate3, plate3.txt, "yield_data/plate3_heatmap.png") %>% tryCatch(error = function(e) NULL)
+plate3 <- as.data.frame(plate3)
+ggHist(plate3, "yield_data/plate3_histogram.png")  %>% tryCatch(error = function(e) NULL)
+
+# All plates histogram
+top.two <- rbind(plate1, plate2)
+all.plates <- rbind(top.two, plate3)
+all.plates <- as.data.frame(all.plates)
+ggHist(all.plates, "yield_data/allplates_histogram.png")  %>% tryCatch(error = function(e) NULL)
+
+
+```
+
+Quality control based on chemical considerations.
+Removed manually, rather than based on descriptor file (idk?).
+
+```{r - quality control for yield data}
+
+# Remove reactions without additive and reactions with additive 7
+plate1_nocontrols <- plate1[c(-1,-5,-9,-13,-20,-24,-28,-32), c(-16,-32,-48)] 
+# Remove reactions without aryl halide
+plate2_nocontrols <- plate2[, c(-16,-32,-48)]
+plate3_nocontrols <- plate3[, c(-16,-32,-48)]
+plate1_nocontrols_v <- as.vector(t(plate1_nocontrols))
+plate2_nocontrols_v <- as.vector(t(plate2_nocontrols))
+plate3_nocontrols_v <- as.vector(t(plate3_nocontrols))
+yield_data <- c(plate1_nocontrols_v, plate2_nocontrols_v, plate3_nocontrols_v)
+```
+
+Chemical descriptors generated off-platform (Spartan GUI via Python).
+Original data is provided, but then re-scaled in an unsupervised fashion (column-wise normalization?).
+* Rescaling most probably done based on early prototypes or prior experience wrt direct use of nominal data
+
+```{r - merge-in predictor variables (descriptors), include=FALSE}
+# ============================================================================
+# Load and prepare output table for modeling
+# ============================================================================
+
+# load output table generated by python script
+output.table <- read.csv("R/output_table.csv", header=TRUE)
+
+# scale the descriptor data
+output.scaled <- as.data.frame(scale(output.table))
+
+# append the yield data from above
+output.scaled$yield <- yield_data
+
+# Uncomment and run line below to view large datasets
+# utils::View(output.scaled)
+
+
+```
+
+Assumed that stratified sample at (chloride, bromide, iodide) level is sufficient.
+Dataset manually traversed, via indices and prior knowledge wrt table structure.
+
+```{r - create train/test samples, include=FALSE}
+# ============================================================================
+# Subset the data to prepare for out-of-sample prediction
+# ============================================================================
+
+# set sampling ratio variable
+sample.ratio <- .7
+
+# separate by all 15 aryl halides
+CF3.Cl <- seq(1, nrow(output.scaled), by=15)
+CF3.Br <- seq(2, nrow(output.scaled), by=15)
+CF3.I <- seq(3, nrow(output.scaled), by=15)
+OMe.Cl <- seq(4, nrow(output.scaled), by=15)
+OMe.Br <- seq(5, nrow(output.scaled), by=15)
+OMe.I <- seq(6, nrow(output.scaled), by=15)
+Et.Cl <- seq(7, nrow(output.scaled), by=15)
+Et.Br <- seq(8, nrow(output.scaled), by=15)
+Et.I <- seq(9, nrow(output.scaled), by=15)
+pyr2.Cl <- seq(10, nrow(output.scaled), by=15)
+pyr2.Br <- seq(11, nrow(output.scaled), by=15)
+pyr2.I <- seq(12, nrow(output.scaled), by=15)
+pyr3.Cl <- seq(13, nrow(output.scaled), by=15)
+pyr3.Br <- seq(14, nrow(output.scaled), by=15)
+pyr3.I <- seq(15, nrow(output.scaled), by=15)
+
+# separate by chloride, bromide, iodide
+ArCl <- seq(1, nrow(output.scaled), by=3)
+ArCl.scaled <- output.scaled[ArCl, ]
+ArCl.scaled <- ArCl.scaled[!(is.na(ArCl.scaled$yield)), ]
+set.seed(8390)
+size <- round(sample.ratio*nrow(ArCl.scaled))
+training <- sample(nrow(ArCl.scaled), size=size, replace=FALSE)
+ArCl.training <- ArCl.scaled[training, ]
+ArCl.test <- ArCl.scaled[-training, ]
+
+ArBr <- seq(2, nrow(output.scaled), by=3)
+ArBr.scaled <- output.scaled[ArBr, ]
+ArBr.scaled <- ArBr.scaled[!(is.na(ArBr.scaled$yield)), ]
+set.seed(9071)
+size <- round(sample.ratio*nrow(ArBr.scaled))
+training <- sample(nrow(ArBr.scaled), size=size, replace=FALSE)
+ArBr.training <- ArBr.scaled[training, ]
+ArBr.test <- ArBr.scaled[-training, ]
+
+ArI <- seq(3, nrow(output.scaled), by=3)
+ArI.scaled <- output.scaled[ArI, ]
+ArI.scaled <- ArI.scaled[!(is.na(ArI.scaled$yield)), ]
+set.seed(6123)
+size <- round(sample.ratio*nrow(ArI.scaled))
+training <- sample(nrow(ArI.scaled), size=size, replace=FALSE)
+ArI.training <- ArI.scaled[training, ]
+ArI.test <- ArI.scaled[-training, ]
+
+# nonpyridyl aryl halides
+nonpyridyl <- sort(c(CF3.Cl, CF3.Br, CF3.I, OMe.Cl, OMe.Br, OMe.I, Et.Cl, Et.Br, Et.I))
+nonpyridyl.scaled <- output.scaled[nonpyridyl, ]
+nonpyridyl.scaled <- nonpyridyl.scaled[!(is.na(nonpyridyl.scaled$yield)), ]
+
+# pyridyl aryl halides
+pyridyl <- sort(c(pyr2.Cl, pyr2.Br, pyr2.I, pyr3.Cl, pyr3.Br, pyr3.I))
+pyridyl.scaled <- output.scaled[pyridyl, ]
+pyridyl.scaled <- pyridyl.scaled[!(is.na(pyridyl.scaled$yield)), ]
+
+# yields under 80% and over 80%
+under80 <- output.scaled$yield<80
+output.under80 <- output.scaled[under80, ]
+output.under80 <- output.under80[!(is.na(output.under80$yield)), ]
+
+output.over80 <- output.scaled[!under80, ]
+output.over80 <- output.over80[!(is.na(output.over80$yield)), ]
+
+
+
+```
+
+Create three "clean" datasets for further processing.
+1. yield = NA removed and split according to plates (1-3)
+2. yield = NA only as control
+3. yield = NA removed
+* order of operation relevant dt (untouched) output.scaled dependency for 1 and 2
+
+Results exammined per histograms.
+
+```{r - clean NA-yield; create NA-yield data for naive prediction (control) }
+
+# ============================================================================
+# Remove reactions without yield data and make histogram
+# ============================================================================
+
+# separate into plates 1,2,3 and remove NA
+output.plate1 <- output.scaled[1:1080, ]  ## plates manually selected via indices
+output.plate1 <- output.plate1[!(is.na(output.plate1$yield)), ]
+output.plate2 <- output.scaled[1081:2520, ]  ## plates manually selected via indices
+output.plate2 <- output.plate2[!(is.na(output.plate2$yield)), ] 
+output.plate3 <- output.scaled[2521:3960, ]  ## plates manually selected via indices
+output.plate3 <- output.plate3[!(is.na(output.plate3$yield)), ]
+
+# control; keep only rows where yield=NA
+output.control.scaled <- output.scaled[(is.na(output.scaled$yield)), ]
+
+# remove rows where yield=NA
+output.scaled <- output.scaled[!(is.na(output.scaled$yield)), ]
+
+# Histogram for modeling yields (removed controls and additive 7)
+ggHist(output.scaled$yield, "yield_data/allplates_nocontrols_histogram.png") %>% tryCatch(error = function(e) NULL)
+
+# Histogram for modeling yields (controls only)
+ggHist(output.control.scaled$yield, "yield_data/allplates_controlsonly_histogram.png") %>% tryCatch(error = function(e) NULL)
+
+
+```
+
+CV applied to ever-increasing data set sizes.
+
+```{r - create training data set/s for CV; run CV}
+# ============================================================================
+# Data splitting for modeling
+# ============================================================================
+
+# Set sample ratio for 70/30 split
+sample.ratio = 0.7
+# Split into training and test set (70/30)
+set.seed(1084)
+size <- round(sample.ratio*nrow(output.scaled))
+training <- sample(nrow(output.scaled), size=size, replace=FALSE)
+training.scaled <- output.scaled[training,]
+test.scaled <- output.scaled[-training,]
+
+# Create smaller partitions within training set (equal to 10, 20, etc. % of TOTAL data)
+size2.5 <- round(0.025*nrow(output.scaled))
+size5 <- round(0.05*nrow(output.scaled))
+size10 <- round(0.10*nrow(output.scaled))
+size20 <- round(0.20*nrow(output.scaled))
+size30 <- round(0.30*nrow(output.scaled))
+size40 <- round(0.40*nrow(output.scaled))
+size50 <- round(0.50*nrow(output.scaled))
+size60 <- round(0.60*nrow(output.scaled))
+# Sampled from within training set to avoid using test set data
+training2.5rows <- sample(nrow(training.scaled),size=size2.5,replace=FALSE)
+training2.5 <- training.scaled[training2.5rows, ]
+training5rows <- sample(nrow(training.scaled),size=size5,replace=FALSE)
+training5 <- training.scaled[training5rows, ]
+training10rows <- sample(nrow(training.scaled),size=size10,replace=FALSE)
+training10 <- training.scaled[training10rows, ]
+training20rows <- sample(nrow(training.scaled),size=size20,replace=FALSE)
+training20 <- training.scaled[training20rows, ]
+training30rows <- sample(nrow(training.scaled),size=size30,replace=FALSE)
+training30 <- training.scaled[training30rows, ]
+training40rows <- sample(nrow(training.scaled),size=size40,replace=FALSE)
+training40 <- training.scaled[training40rows, ]
+training50rows <- sample(nrow(training.scaled),size=size50,replace=FALSE)
+training50 <- training.scaled[training50rows, ]
+training60rows <- sample(nrow(training.scaled),size=size60,replace=FALSE)
+training60 <- training.scaled[training60rows, ]
+
+# 10-fold cross-validation
+train_control <- trainControl(method="cv", number=10, savePredictions=TRUE)
+
+```
+
+Previously trained models may be loaded manually here.
+
+```{r - load previously trained models (NOT run), echo=TRUE}
+
+# ============================================================================
+# Read in previously trained models saved as .rds files
+# ============================================================================
+
+# Run to read in previously trained models
+
+lmFit.reduced <- readRDS("rds/lmFit_reduced.rds")
+lmFit_top5 <- readRDS("rds/lmFit_top5.rds")
+knnFit <- readRDS("rds/knnFit.rds")
+svmFit <- readRDS("rds/svmFit.rds")
+bayesglmFit <- readRDS("rds/bayesglmFit.rds")
+lmFit <- readRDS("rds/lmFit.rds")
+nnetFit.100nodes <- readRDS("rds/nnetFit_100nodes.rds")
+rfFit <- readRDS("rds/rfFit.rds")
+rfFit2.5 <- readRDS("rds/rfFit2_5.rds")
+rfFit5 <- readRDS("rds/rfFit5.rds")
+rfFit10 <- readRDS("rds/rfFit10.rds")
+rfFit20 <- readRDS("rds/rfFit20.rds")
+rfFit30 <- readRDS("rds/rfFit30.rds")
+rfFit40 <- readRDS("rds/rfFit40.rds")
+rfFit50 <- readRDS("rds/rfFit50.rds")
+rfFit60 <- readRDS("rds/rfFit60.rds")
+rfFit70 <- readRDS("rds/rfFit70.rds")
+rfFit.LOO <- readRDS("rds/rfFit_LOO.rds")
+rfFit.ArCl <- readRDS("rds/rfFit_ArCl.rds")
+rfFit.ArBr <- readRDS("rds/rfFit_ArBr.rds")
+rfFit.ArI <- readRDS("rds/rfFit_ArI.rds")
+rfFit.ArBr.all <- readRDS("rds/rfFit_ArBr_all.rds")
+rfFit.nonpyridyl <- readRDS("rds/rfFit_nonpyridyl.rds")
+rfFit.under80 <- readRDS("rds/rfFit_under80.rds")
+
+
+```
+
+Benchmarking and qualitative comparison of alternative models, both linear and machine learning.
+___________________
+
+First, up regularized linear regression: Lasso, Ridge, and Elastic Net
+
+```{r - Setup and execute regularized linear regression models }
+# ============================================================================
+# Regularized linear regression: Lasso, Ridge, and Elastic Net
+# ============================================================================
+
+set.seed(1533)
+x <- as.matrix(training.scaled[, 1:120])
+x.test <- as.matrix(test.scaled[, 1:120])
+y <- training.scaled[, 121]
+y.test <- test.scaled[, 121]
+
+# model type determined by the 'alpha' setting; lasso(alpha=1), elastic_net(alpha<1 AND >0), ridge(alpha=0)
+fit.lasso <- glmnet(x, y, family="gaussian", alpha=1) # lasso
+fit.elnet <- glmnet(x, y, family="gaussian", alpha=0.5) # elastic net
+fit.ridge <- glmnet(x, y, family="gaussian", alpha=0) # ridge
+
+# create and execute 10-step spectrum wrt model type
+for (i in 0:10) {
+  assign(paste("fit", i, sep=""), cv.glmnet(x, y, type.measure="mse", 
+                                            alpha=i/10,family="gaussian"))
+}
+
+# Plot solution paths
+png(filename="R/plots/regularization_solution_paths.png", width = 800, height = 1000)
+par(mfrow=c(3,2))
+plot(fit.lasso, xvar="lambda")
+plot(fit10, main="LASSO")
+plot(fit.ridge, xvar="lambda")
+plot(fit0, main="Ridge")
+plot(fit.elnet, xvar="lambda")
+plot(fit2, main="Elastic Net")
+dev.off()
+
+# Predict y values and calculate RMSE and R^2 for range of alpha values
+yhat0 <- predict(fit0, s=fit0$lambda.1se, newx=x.test) # ridge
+yhat1 <- predict(fit1, s=fit1$lambda.1se, newx=x.test) # elastic net
+yhat2 <- predict(fit2, s=fit2$lambda.1se, newx=x.test) # elastic net
+yhat3 <- predict(fit3, s=fit3$lambda.1se, newx=x.test) # elastic net
+yhat4 <- predict(fit4, s=fit4$lambda.1se, newx=x.test) # elastic net
+yhat5 <- predict(fit5, s=fit5$lambda.1se, newx=x.test) # elastic net
+yhat6 <- predict(fit6, s=fit6$lambda.1se, newx=x.test) # elastic net
+yhat7 <- predict(fit7, s=fit7$lambda.1se, newx=x.test) # elastic net
+yhat8 <- predict(fit8, s=fit8$lambda.1se, newx=x.test) # elastic net
+yhat9 <- predict(fit9, s=fit9$lambda.1se, newx=x.test) # elastic net
+yhat10 <- predict(fit10, s=fit10$lambda.1se, newx=x.test) # lasso
+# Calculate RMSE
+rmse0 <- rmse(yhat0, y.test)
+rmse1 <- rmse(yhat1, y.test)
+rmse2 <- rmse(yhat2, y.test)
+rmse3 <- rmse(yhat3, y.test)
+rmse4 <- rmse(yhat4, y.test)
+rmse5 <- rmse(yhat5, y.test)
+rmse6 <- rmse(yhat6, y.test)
+rmse7 <- rmse(yhat7, y.test)
+rmse8 <- rmse(yhat8, y.test)
+rmse9 <- rmse(yhat9, y.test)
+rmse10 <- rmse(yhat10, y.test)
+# Calculate R^2
+rsquared0 <- cor(yhat0, y.test)**2
+rsquared1 <- cor(yhat1, y.test)**2
+rsquared2 <- cor(yhat2, y.test)**2
+rsquared3 <- cor(yhat3, y.test)**2
+rsquared4 <- cor(yhat4, y.test)**2
+rsquared5 <- cor(yhat5, y.test)**2
+rsquared6 <- cor(yhat6, y.test)**2
+rsquared7 <- cor(yhat7, y.test)**2
+rsquared8 <- cor(yhat8, y.test)**2
+rsquared9 <- cor(yhat9, y.test)**2
+rsquared10 <- cor(yhat10, y.test)**2
+# generate metrix for plotting
+mfit1 <- cv.glmnet(x, y, type.measure="mse", alpha=0.01, family="gaussian")
+mfit2 <- cv.glmnet(x, y, type.measure="mse", alpha=0.1, family="gaussian")
+mfit3 <- cv.glmnet(x, y, type.measure="mse", alpha=0.2, family="gaussian")
+mfit4 <- cv.glmnet(x, y, type.measure="mse", alpha=0.5, family="gaussian")
+mfit5 <- cv.glmnet(x, y, type.measure="mse", alpha=1, family="gaussian")
+
+mfit1.pred <- predict(mfit1, s=mfit1$lambda.1se, newx=x.test)
+mfit2.pred <- predict(mfit2, s=mfit2$lambda.1se, newx=x.test)
+mfit3.pred <- predict(mfit3, s=mfit3$lambda.1se, newx=x.test)
+mfit4.pred <- predict(mfit4, s=mfit4$lambda.1se, newx=x.test)
+mfit5.pred <- predict(mfit5, s=mfit5$lambda.1se, newx=x.test)
+
+mfit1.rmse <- rmse(mfit1.pred, y.test)
+mfit2.rmse <- rmse(mfit2.pred, y.test)
+mfit3.rmse <- rmse(mfit3.pred, y.test)
+mfit4.rmse <- rmse(mfit4.pred, y.test)
+mfit5.rmse <- rmse(mfit5.pred, y.test)
+
+mfit1.r2 <- cor(mfit1.pred, y.test)**2
+mfit2.r2 <- cor(mfit2.pred, y.test)**2
+mfit3.r2 <- cor(mfit3.pred, y.test)**2
+mfit4.r2 <- cor(mfit4.pred, y.test)**2
+mfit5.r2 <- cor(mfit5.pred, y.test)**2
+
+# Plot RMSE and R^2 for different values of alpha
+df <- data.frame(alpha = c('0 (LASSO)', '0.01', '0.1', '0.2', '0.5', '1 (Ridge)'),
+                 rmse = c(rmse0, mfit1.rmse, mfit2.rmse, mfit3.rmse, mfit4.rmse, mfit5.rmse),
+                 r2 = c(rsquared0, mfit1.r2, mfit2.r2, mfit3.r2, mfit4.r2, mfit5.r2))
+
+rmse.plot <- ggplot(df, aes(x=rmse, y=alpha)) +
+  geom_point() +
+  geom_text(label=round(df$rmse, 2), vjust=-1, size=3) +
+  labs(x='RMSE', y='alpha') +    
+  xlim(15,16.5)
+
+r2.plot <- ggplot(df, aes(x=r2, y=alpha)) +
+  geom_point() +
+  geom_text(label=round(df$r2, 4), vjust=-1, size=3) +
+  labs(x='Rsquared', y='alpha') +    
+  xlim(0.64, 0.68)
+
+plots <- arrangeGrob(rmse.plot, r2.plot, ncol=2)
+ggsave(plots, file="R/plots/regularized_models.png", width=8, height=3)
+
+# print plots
+print(plots)
+
+```
+
+Feature selection via a priori removal of correlated features
+
+```{r - feature selection via correlation}
+# ============================================================================
+# Dimension reduction by removing correlated descriptors
+# ============================================================================
+
+# Read in data for each reaction component
+# These tables contain 1 row per different molecule (e.g., 22 rows in additive.csv)
+additive <- read.csv("R/additive.csv", header=TRUE)
+aryl.halide <- read.csv("R/aryl_halide.csv", header=TRUE)
+base <- read.csv("R/base.csv", header=TRUE)
+ligand <- read.csv("R/ligand.csv", header=TRUE)
+
+# Correlation plots
+ggcorr(additive, label=TRUE, alpha=0)
+ggsave(file="R/plots/additive_corrplot.png", width=10, height=10)
+ggcorr(aryl.halide, label=TRUE, alpha=0)
+ggsave(file="R/plots/aryl_halide_corrplot.png", width=10, height=10)
+ggcorr(base, label=TRUE, alpha=0)
+ggsave(file="R/plots/base_corrplot.png", width=5, height=5)
+ggcorr(ligand, label=FALSE, alpha=0)
+ggsave(file="R/plots/ligand_corrplot.png", width=25, height=25)
+
+# Feature selection by removing correlated features
+# remove name column (need to do for cor function)
+additive.num <- additive[, -which(names(additive)=="name")]
+aryl.halide.num <- aryl.halide[, -which(names(aryl.halide)=="name")]
+base.num <- base[, -which(names(base)=="name")]
+ligand.num <- ligand[, -which(names(ligand)=="name")]
+
+# define correlation cut.off
+corr_cutoff = 0.5
+
+# additive
+additive.bad <- findCorrelation(cor(additive.num), cutoff = corr_cutoff, exact = TRUE)
+additive.good <- names(additive.num[, -additive.bad])
+additive.reduced <- additive.num[, additive.good]
+pca.additive.reduced <- prcomp(additive.reduced)
+plot(pca.additive.reduced)
+ggcorr(additive.reduced, label=TRUE, alpha=0)
+ggsave(file="R/plots/additive_reduced_corrplot.png", width=6, height=6)
+
+# aryl halide
+aryl.halide.bad <- findCorrelation(cor(aryl.halide.num), cutoff = corr_cutoff, exact = TRUE)
+aryl.halide.good <- names(aryl.halide.num[, -aryl.halide.bad])
+aryl.halide.reduced <- aryl.halide.num[, aryl.halide.good]
+pca.aryl.halide.reduced <- prcomp(aryl.halide.reduced)
+plot(pca.aryl.halide.reduced)
+ggcorr(aryl.halide.reduced, label=TRUE, alpha=0)
+ggsave(file="R/plots/aryl_halide_reduced_corrplot.png", width=6, height=6)
+
+# base
+base.bad <- findCorrelation(cor(base.num), cutoff = corr_cutoff, exact = TRUE)
+base.good <- names(base.num[, -base.bad])
+base.reduced <- base.num[, base.good]
+pca.base.reduced <- prcomp(base.reduced)
+plot(pca.base.reduced)
+ggcorr(base.reduced, label=TRUE, alpha=0)
+ggsave(file="R/plots/base_reduced_corrplot.png", width=3, height=3)
+
+# ligand
+ligand.bad <- findCorrelation(cor(ligand.num), cutoff = corr_cutoff, exact = TRUE)
+ligand.good <- names(ligand.num[, -ligand.bad])
+ligand.reduced <- ligand.num[, ligand.good]
+pca.ligand.reduced <- prcomp(ligand.reduced)
+plot(pca.ligand.reduced)
+ggcorr(ligand.reduced, label=TRUE, alpha=0)
+ggsave(file="R/plots/ligand_reduced_corrplot.png", width=4, height=4)
+
+# Subset to smaller number of dimensions
+reduced.vars = c(names(additive.reduced),
+                 names(aryl.halide.reduced),
+                 names(base.reduced),
+                 names(ligand.reduced),
+                 "yield")
+training.scaled.reduced <- training.scaled[, reduced.vars]
+test.scaled.reduced <- test.scaled[, reduced.vars]
+
+# Train linear model using reduced set of descriptors
+lmFit.reduced <- train(yield ~ ., data=training.scaled.reduced, trControl=train_control, method="lm")
+saveRDS(lmFit.reduced, "rds/lmFit_reduced.rds")
+
+lmFit.reduced.pred <- predict(lmFit.reduced, test.scaled.reduced)
+lmFit.reduced.rmse <- rmse(lmFit.reduced.pred, test.scaled.reduced$yield)
+lmFit.reduced.r2 <- cor(lmFit.reduced.pred, test.scaled.reduced$yield)**2
+
+df <- data.frame(x = lmFit.reduced.pred, 
+                 y = test.scaled.reduced$yield,
+                 type = as.factor('Linear Model'))
+p <- ggplot(df, aes(x = x, y = y)) +
+  geom_point(alpha = 0.4) + 
+  scale_x_continuous(breaks = seq(-25,100,25), lim=c(-30, 100)) +
+  labs(x='Predicted Yield', y='Observed Yield') + 
+  geom_segment(aes(x=0, xend=100, y=0, yend=100), linetype="dashed") +
+  geom_smooth(method="loess", se=FALSE)
+
+#save plot
+ggsave(file="R/plots/lm_reduced.png", width=5, height=4)
+# display plot
+print(p)
+
+```
+
+Various models are configured and trained. Including: KNN, SVM, Bayes GLM, linear regression, neural net, and random forest.
+
+```{r - initial battery of ml models}
+# ============================================================================
+# Training various machine learning models (models are saved as .rds files)
+# ============================================================================
+
+# k-nearest neighbor (kNN)
+knnFit <- train(yield ~ ., data=training.scaled, trControl=train_control, method="knn")
+png(filename="R/plots/knn.png", width = 1000, height = 600)
+predVals <- extractPrediction(list(knnFit))
+plotObsVsPred(predVals)
+dev.off()
+saveRDS(knnFit, "rds/knnFit.rds")
+
+# support vector machine (SVM)
+png(filename="R/plots/svm.png", width = 1000, height = 600)
+predVals <- extractPrediction(list(svmFit))
+plotObsVsPred(predVals)
+dev.off()
+saveRDS(svmFit, "rds/svmFit.rds")
+
+# Bayes generalized linear model (GLM)
+bayesglmFit <- train(yield ~ ., data=training.scaled, trControl=train_control, method="bayesglm")
+png(filename="R/plots/bayesglm.png", width = 1000, height = 600)
+predVals <- extractPrediction(list(bayesglmFit))
+plotObsVsPred(predVals)
+dev.off()
+saveRDS(bayesglmFit, "rds/bayesglmFit.rds")
+
+# linear model
+lmFit <- train(yield ~ ., data=training.scaled, trControl=train_control, method="lm")
+png(filename="R/plots/lm.png", width = 1000, height = 600)
+predVals <- extractPrediction(list(lmFit))
+plotObsVsPred(predVals)
+dev.off()
+saveRDS(lmFit, "rds/lmFit.rds")
+
+# neural network (neuralnet package)
+n <- names(training.scaled)
+f <- as.formula(paste("yield ~", paste(n[!n %in% "yield"], collapse = " + ")))
+set.seed(3288)
+nnetFit.100nodes <- neuralnet(f, data=training.scaled, hidden=c(100), linear.output=TRUE, threshold=1, stepmax=1e7)
+saveRDS(nnetFit.100nodes, "rds/nnetFit_100nodes.rds")
+
+# random forest 
+set.seed(8915)
+rfFit <- train(yield ~ ., data=training.scaled, trControl=train_control, method="rf", importance=TRUE)
+png(filename="R/plots/rf.png", width = 1000, height = 600)
+predVals <- extractPrediction(list(rfFit))
+plotObsVsPred(predVals)
+dev.off()
+saveRDS(rfFit, "rds/rfFit.rds")
+```
+
+Here, the predictive accuracy wrt top features selected by RF model are examined via linear model.
+
+```{r - performance/calibration plots of top variables via linear model}
+# ============================================================================
+# Calibration plot for linear model using 5 top RF descriptors
+# ============================================================================
+
+# linear model (top 5 descriptors from final RF model)
+lmFit_top5 <- train(yield ~ additive_.C3_NMR_shift + 
+                      additive_E_LUMO + 
+                      aryl_halide_.C3_NMR_shift +
+                      additive_.O1_electrostatic_charge +
+                      additive_.C5_electrostatic_charge, 
+                    data=training.scaled, trControl=train_control, method="lm")
+png(filename="R/plots/lm_top5.png", width = 1000, height = 600)
+predVals <- extractPrediction(list(lmFit))
+plotObsVsPred(predVals)
+dev.off()
+saveRDS(lmFit, "rds/lmFit_top5.rds")
+
+# Predict for testing set
+lm.top5.pred <- predict(lmFit_top5, test.scaled)
+
+# R^2 values
+lm.top5.pred.r2 <- cor(lm.top5.pred, test.scaled$yield)**2
+
+# RMSE
+lm.top5.pred.rmse <- rmse(lm.top5.pred, test.scaled$yield)
+
+# Create data frames with predicted and observed values for test set
+df1 <- data.frame(x = lm.top5.pred, y = test.scaled$yield)
+
+# Make calibration plot
+p <- ggplot(df1, aes(x = x, y = y)) +
+  geom_point(alpha = 0.3, color="dodgerblue3", size=0.8) + 
+  scale_x_continuous(breaks = seq(-25,100,25), lim=c(-25, 100)) +
+  geom_segment(aes(x=0, xend=100, y=0, yend=100), linetype="dashed", size=0.3) +
+  geom_smooth(method="loess", se=FALSE, size=0.5, color="black") +
+  labs(x='Predicted Yield', y='Observed Yield')
+ggsave(file="R/plots/lm_top5_calibration_plot.png", width=5, height=3)
+
+# view plot 
+plot(p)
+
+```
+
+Comparison of goodness of fit measures, R^2 and RMSE.
+Negative yield predictions set to zero for calculation of R^2/RMSE performance.
+
+```{r - comparative performance metrics/plots}
+# ============================================================================
+# RMSE and R^2 plot for different machine learning models
+# ============================================================================
+
+# Predict for testing set
+lm.pred <- predict(lmFit, test.scaled)
+svm.pred <- predict(svmFit, test.scaled)
+knn.pred <- predict(knnFit, test.scaled)
+nnet.pred <- predict(nnetFit.100nodes, test.scaled[, 1:120])
+bayesglm.pred <- predict(bayesglmFit, test.scaled)
+rf.pred <- predict(rfFit, test.scaled)
+
+# Set negative predictions to zero
+lm.pred[lm.pred<0] <- 0
+svm.pred[svm.pred<0] <- 0
+knn.pred[knn.pred<0] <- 0
+nnet.pred[nnet.pred<0] <- 0
+bayesglm.pred[bayesglm.pred<0] <- 0
+rf.pred[rf.pred<0] <- 0
+
+# R^2 values
+lm.pred.r2 <- cor(lm.pred, test.scaled$yield)**2
+svm.pred.r2 <- cor(svm.pred, test.scaled$yield)**2
+knn.pred.r2 <- cor(knn.pred, test.scaled$yield)**2
+nnet.pred.r2 <- cor(nnet.pred, test.scaled$yield)**2
+bayesglm.pred.r2 <- cor(bayesglm.pred, test.scaled$yield)**2
+rf.pred.r2 <- cor(rf.pred, test.scaled$yield)**2
+
+# RMSE
+lm.pred.rmse <- rmse(lm.pred, test.scaled$yield)
+svm.pred.rmse <- rmse(svm.pred, test.scaled$yield)
+knn.pred.rmse <- rmse(knn.pred, test.scaled$yield)
+nnet.pred.rmse <- rmse(nnet.pred, test.scaled$yield)
+bayesglm.pred.rmse <- rmse(bayesglm.pred, test.scaled$yield)
+rf.pred.rmse <- rmse(rf.pred, test.scaled$yield)
+
+# Plot RMSE and R^2
+df <- data.frame(rmse = c(lm.pred.rmse, svm.pred.rmse, knn.pred.rmse, nnet.pred.rmse, bayesglm.pred.rmse, rf.pred.rmse),
+                 r2 = c(lm.pred.r2, svm.pred.r2, knn.pred.r2, nnet.pred.r2, bayesglm.pred.r2, rf.pred.r2))
+row.names(df) <- c('Linear Model', 'SVM', 'kNN', 'Neural Network', 'Bayes GLM', 'Random Forest')
+
+rmse.plot <- ggplot(df, aes(y=reorder(rownames(df), rmse), x=rmse)) +
+  geom_point() +
+  geom_text(label=round(df$rmse, 1), vjust=-1, size=3) +
+  labs(x='RMSE', y='') +
+  xlim(0,20)
+r2.plot <- ggplot(df, aes(y=reorder(rownames(df), rmse), x=r2)) +
+  geom_point() +
+  geom_text(label=round(df$r2, 2), vjust=-1, size=3) +
+  labs(x='Rsquared', y='') +
+  xlim(0.6,1)
+plots <- arrangeGrob(rmse.plot, r2.plot, ncol=2)
+ggsave(plots, file="R/plots/ml_models.png", width=7, height=2.5)
+
+# view plots
+plot(plots)
+
+```
+
+All machine learning models are simultaneoulsy evaluated and plotted, predicted vs observed.
+
+```{r comparative calibration plots}
+
+# ============================================================================
+# Calibration plots for different machine learning models
+# ============================================================================
+
+# Create data frames with predicted and observed values for test set
+df1 <- data.frame(x = lm.pred, y = test.scaled$yield, type = as.factor('Linear Model'))
+df2 <- data.frame(x = knn.pred, y = test.scaled$yield, type = as.factor('kNN'))
+df3 <- data.frame(x = svm.pred, y = test.scaled$yield, type = as.factor('SVM'))
+df4 <- data.frame(x = bayesglm.pred, y = test.scaled$yield, type = as.factor('Bayes GLM'))
+df5 <- data.frame(x = nnet.pred, y = test.scaled$yield, type = as.factor('Neural Network'))
+df6 <- data.frame(x = rf.pred, y = test.scaled$yield, type = as.factor('Random Forest'))
+
+# Make calibration plots
+facet.df <- do.call(rbind, list(df1, df2, df3, df4, df5, df6)) 
+facet.plot <- ggplot(facet.df, aes(x = x, y = y)) +
+  geom_point(alpha = 0.3, color="dodgerblue3", size=0.8) + 
+  scale_x_continuous(breaks = seq(-25,100,25), lim=c(-25, 100)) +
+  geom_segment(aes(x=0, xend=100, y=0, yend=100), linetype="dashed", size=0.3) +
+  geom_smooth(method="loess", se=FALSE, size=0.5, color="black") +
+  facet_wrap(~type, ncol=3) +
+  labs(x='Predicted Yield', y='Observed Yield')
+ggsave(file="R/plots/ml_calibration_plots.png", width=8, height=5)
+
+#view plots
+(facet.plot)
+
+# Make calibration plots (Supporting Information)
+facet.df <- do.call(rbind, list(df1, df2, df3, df4, df5, df6)) 
+facet.plot <- ggplot(facet.df, aes(x = x, y = y)) +
+  geom_point(alpha = 0.3, color="dodgerblue3", size=0.8) + 
+  scale_x_continuous(breaks = seq(-25,100,25), lim=c(-25, 100)) +
+  geom_segment(aes(x=0, xend=100, y=0, yend=100), linetype="dashed", size=0.3) +
+  geom_smooth(method="loess", se=FALSE, size=0.5, color="black") +
+  facet_wrap(~type, ncol=2) +
+  labs(x='Predicted Yield', y='Observed Yield')
+ggsave(file="R/plots/ml_calibration_plots_SI.png", width=6, height=8)
+
+#view plots
+(facet.plot)
+
+```
+
+OOS prediction task is conducted on a stratified basis, per additive (idk?).
+* Superiority and mechanistic consistency of results confirmed, stability of RF results now explored on a stratified basis.
+* Large variation noted along this dimension wrt successful OOS yield prediction.
+* However, even poorest performing strata out-perform other, higher information models (except for neural network)
+
+```{r - Out of sample prediction, per additives}
+# ============================================================================
+# Random forest: Predicting out-of-sample additives
+# ============================================================================
+
+# double check that row numbers are correct by testing number of unique additives
+# length(unique(output.scaled$additive_.C3_NMR_shift[1:1075])) == 6 # TRUE (one more row is 7)
+# length(unique(output.scaled$additive_.C3_NMR_shift[1:2515])) == 14 # TRUE (one more row is 15)
+# length(unique(output.scaled$additive_.C3_NMR_shift)) == 22
+
+# plates 1 and 2 (after NA's removed)
+plate12 <- output.scaled[1:2515, ]
+
+# plate 3 (after NA's removed)
+plate3 <- output.scaled[2516:3955, ]
+
+# leave-one-out by additive
+by.additive <- split(seq_along(plate12$additive_.C3_NMR_shift), plate12$additive_.C3_NMR_shift)
+tc.additive <- trainControl(method="cv", indexOut=by.additive, savePredictions = TRUE)
+
+# leave-one-out random forest (70% of data)
+set.seed(8915)
+rfFit.LOO <- train(yield ~ ., data=plate12, trControl=tc.additive, method="rf", importance=TRUE)
+png(filename="R/plots/rf_LOO.png", width = 1000, height = 600)
+predVals <- extractPrediction(list(rfFit.LOO))
+plotObsVsPred(predVals)
+dev.off()
+saveRDS(rfFit.LOO, "rds/rfFit_LOO.rds")
+
+rf.predTrain.LOO <- predict(rfFit.LOO, plate12)
+rf.predTrain.LOO.rmse <- rmse(rf.predTrain.LOO, plate12$yield)
+rf.predTrain.LOO.r2 <- cor(rf.predTrain.LOO, plate12$yield)**2
+
+rf.pred.LOO <- predict(rfFit.LOO, plate3)
+rf.pred.LOO.rmse <- rmse(rf.pred.LOO, plate3$yield)
+rf.pred.LOO.r2 <- cor(rf.pred.LOO, plate3$yield)**2
+
+# Create calibration plots for additives
+plate3$additive_id <- as.factor(plate3$additive_.C3_NMR_shift)
+levels(plate3$additive_id) <- c('Additive 16', 'Additive 18', 'Additive 20', 'Additive 21', 
+                                'Additive 22', 'Additive 17', 'Additive 19', 'Additive 23')
+plate3$additive_id <- sortLvls.fnc(plate3$additive_id, c(1, 6, 2, 7, 3, 4, 5, 8))
+plate3$additive_id = factor(plate3$additive_id,levels(plate3$additive_id)[c(1, 6, 2, 7, 3, 4, 5, 8)])
+df <- cbind(plate3, rf.pred.LOO)
+p <- ggplot(df, aes(x=rf.pred.LOO, y=yield)) +
+  geom_point(alpha=0.4, aes(col=additive_id), size=1) +
+  labs(x='Predicted Yield', y='Observed Yield') +   
+  xlim(0, 100) +
+  ylim(0, 100) + 
+  geom_smooth(method='lm', se=FALSE, color="black", size=0.5) +
+  facet_wrap(~additive_id, nrow=2, ncol=4) +
+  geom_segment(aes(x=0, xend=100, y=0, yend=100), linetype="dashed", size=0.3) +
+  theme(legend.position="none")
+ggsave(file="R/plots/additive_out_of_sample.png", width=8, height=4.5)
+
+# Calculate RMSE and R^2 for additives 16-23
+additive.16 <- plate3[plate3$additive_id=='Additive 16', ]
+rf.pred.16 <- predict(rfFit.LOO, additive.16)
+rf.pred.16.rmse <- rmse(rf.pred.16, additive.16$yield)
+rf.pred.16.r2 <- cor(rf.pred.16, additive.16$yield)**2
+
+additive.17 <- plate3[plate3$additive_id=='Additive 17', ]
+rf.pred.17 <- predict(rfFit.LOO, additive.17)
+rf.pred.17.rmse <- rmse(rf.pred.17, additive.17$yield)
+rf.pred.17.r2 <- cor(rf.pred.17, additive.17$yield)**2
+
+additive.18 <- plate3[plate3$additive_id=='Additive 18', ]
+rf.pred.18 <- predict(rfFit.LOO, additive.18)
+rf.pred.18.rmse <- rmse(rf.pred.18, additive.18$yield)
+rf.pred.18.r2 <- cor(rf.pred.18, additive.18$yield)**2
+
+additive.19 <- plate3[plate3$additive_id=='Additive 19', ]
+rf.pred.19 <- predict(rfFit.LOO, additive.19)
+rf.pred.19.rmse <- rmse(rf.pred.19, additive.19$yield)
+rf.pred.19.r2 <- cor(rf.pred.19, additive.19$yield)**2
+
+additive.20 <- plate3[plate3$additive_id=='Additive 20', ]
+rf.pred.20 <- predict(rfFit.LOO, additive.20)
+rf.pred.20.rmse <- rmse(rf.pred.20, additive.20$yield)
+rf.pred.20.r2 <- cor(rf.pred.20, additive.20$yield)**2
+
+additive.21 <- plate3[plate3$additive_id=='Additive 21', ]
+rf.pred.21 <- predict(rfFit.LOO, additive.21)
+rf.pred.21.rmse <- rmse(rf.pred.21, additive.21$yield)
+rf.pred.21.r2 <- cor(rf.pred.21, additive.21$yield)**2
+
+additive.22 <- plate3[plate3$additive_id=='Additive 22', ]
+rf.pred.22 <- predict(rfFit.LOO, additive.22)
+rf.pred.22.rmse <- rmse(rf.pred.22, additive.22$yield)
+rf.pred.22.r2 <- cor(rf.pred.22, additive.22$yield)**2
+
+additive.23 <- plate3[plate3$additive_id=='Additive 23', ]
+rf.pred.23 <- predict(rfFit.LOO, additive.23)
+rf.pred.23.rmse <- rmse(rf.pred.23, additive.23$yield)
+rf.pred.23.r2 <- cor(rf.pred.23, additive.23$yield)**2
+
+# Print RMSE and R^2 to console
+paste0("Additive 16: RMSE = ", rf.pred.16.rmse, ", R^2 = ", rf.pred.16.r2)
+paste0("Additive 17: RMSE = ", rf.pred.17.rmse, ", R^2 = ", rf.pred.17.r2)
+paste0("Additive 18: RMSE = ", rf.pred.18.rmse, ", R^2 = ", rf.pred.18.r2)
+paste0("Additive 19: RMSE = ", rf.pred.19.rmse, ", R^2 = ", rf.pred.19.r2)
+paste0("Additive 20: RMSE = ", rf.pred.20.rmse, ", R^2 = ", rf.pred.20.r2)
+paste0("Additive 21: RMSE = ", rf.pred.21.rmse, ", R^2 = ", rf.pred.21.r2)
+paste0("Additive 22: RMSE = ", rf.pred.22.rmse, ", R^2 = ", rf.pred.22.r2)
+paste0("Additive 23: RMSE = ", rf.pred.23.rmse, ", R^2 = ", rf.pred.23.r2)
+
+
+```
+
+Sensitivity analysis: RF predictive performance versus sparsity/completeness of training data
+
+```{r - sensitivity analysis wrt relative sparsity of training set}
+# ============================================================================
+# Random forest under sparsity: Training models
+# ============================================================================
+
+# Random forest (2.5% of data)
+set.seed(8915)
+rfFit2.5 <- train(yield ~ ., data=training2.5, trControl=train_control, method="rf")
+saveRDS(rfFit2.5, "rds/rfFit2_5.rds")
+
+# Random forest (5% of data)
+set.seed(8915)
+rfFit5 <- train(yield ~ ., data=training5, trControl=train_control, method="rf")
+saveRDS(rfFit5, "rds/rfFit5.rds")
+
+# Random forest (10% of data)
+set.seed(8915)
+rfFit10 <- train(yield ~ ., data=training10, trControl=train_control, method="rf")
+saveRDS(rfFit10, "rds/rfFit10.rds")
+
+# Random forest (20% of data)
+set.seed(8915)
+rfFit20 <- train(yield ~ ., data=training20, trControl=train_control, method="rf")
+saveRDS(rfFit20, "rds/rfFit20.rds")
+
+# Random forest (30% of data)
+set.seed(8915)
+rfFit30 <- train(yield ~ ., data=training30, trControl=train_control, method="rf")
+saveRDS(rfFit30, "rds/rfFit30.rds")
+
+# Random forest (40% of data)
+set.seed(8915)
+rfFit40 <- train(yield ~ ., data=training40, trControl=train_control, method="rf")
+saveRDS(rfFit40, "rds/rfFit40.rds")
+
+# Random forest (50% of data)
+set.seed(8915)
+rfFit50 <- train(yield ~ ., data=training50, trControl=train_control, method="rf")
+saveRDS(rfFit50, "rds/rfFit50.rds")
+
+# Random forest (60% of data)
+set.seed(8915)
+rfFit60 <- train(yield ~ ., data=training60, trControl=train_control, method="rf")
+saveRDS(rfFit60, "rds/rfFit60.rds")
+
+# Random forest (70% of data - all training data - rfFit70 is identical to rfFit)
+set.seed(8915)
+rfFit70 <- train(yield ~ ., data=training.scaled, trControl=train_control, method="rf", importance=TRUE)
+saveRDS(rfFit70, "rds/rfFit70.rds")
+
+```
+
+Plots for sensitivity analysis.
+* Note: excellent performance even at 20/80. What does this say about out-of-the-box "intelligence" of boosted trees?
+* I would suggest this is due to boosted trees employing the same logic as trained experimentalists or diagnosticians.
+
+```{r - all plots for sparsity tests}
+# ============================================================================
+# Random forest under sparsity: Making calibration plots
+# ============================================================================
+
+# Predict for testing set
+rf.pred2.5 <- predict(rfFit2.5, test.scaled)
+rf.pred5 <- predict(rfFit5, test.scaled)
+rf.pred10 <- predict(rfFit10, test.scaled)
+rf.pred20 <- predict(rfFit20, test.scaled)
+rf.pred30 <- predict(rfFit30, test.scaled)
+rf.pred40 <- predict(rfFit40, test.scaled)
+rf.pred50 <- predict(rfFit50, test.scaled)
+rf.pred60 <- predict(rfFit60, test.scaled)
+rf.pred70 <- predict(rfFit70, test.scaled)
+
+# Plot expected vs. observed
+
+# Create data frames
+df1 <- data.frame(x = rf.pred2.5, y = test.scaled$yield, type = as.factor('2.5%'))
+df2 <- data.frame(x = rf.pred5, y = test.scaled$yield, type = as.factor('5%'))
+df3 <- data.frame(x = rf.pred10, y = test.scaled$yield, type = as.factor('10%'))
+df4 <- data.frame(x = rf.pred20, y = test.scaled$yield, type = as.factor('20%'))
+df5 <- data.frame(x = rf.pred30, y = test.scaled$yield, type = as.factor('30%'))
+df6 <- data.frame(x = rf.pred40, y = test.scaled$yield, type = as.factor('40%'))
+df7 <- data.frame(x = rf.pred50, y = test.scaled$yield, type = as.factor('50%'))
+df8 <- data.frame(x = rf.pred60, y = test.scaled$yield, type = as.factor('60%'))
+df9 <- data.frame(x = rf.pred70, y = test.scaled$yield, type = as.factor('70%'))
+
+facet.df <- do.call(rbind, list(df1, df2, df3, 
+                                df4, df5, df6, 
+                                df7, df8, df9)) 
+facet.plot <- ggplot(facet.df, aes(x = x, y = y)) +
+  geom_point(alpha = 0.3, color="dodgerblue3", size=1) + 
+  scale_x_continuous(breaks = seq(0,100,25), lim=c(0, 100)) +
+  geom_segment(aes(x=0, xend=100, y=0, yend=100), linetype="dashed", size=0.3) +
+  geom_smooth(method="loess", se=FALSE, size=0.5, color="black") +
+  facet_wrap(~type, ncol=3) +
+  labs(x='Predicted Yield', y='Observed Yield')
+
+ggsave(file="R/plots/rf_sparsity.png", width=8, height=9)
+
+
+# ============================================================================
+# Random forest under sparsity: Plotting R^2 and RMSE
+# ============================================================================
+
+# R^2 values
+rf.pred2.5.r2 <- cor(rf.pred2.5, test.scaled$yield)**2
+rf.pred5.r2 <- cor(rf.pred5, test.scaled$yield)**2
+rf.pred10.r2 <- cor(rf.pred10, test.scaled$yield)**2
+rf.pred20.r2 <- cor(rf.pred20, test.scaled$yield)**2
+rf.pred30.r2 <- cor(rf.pred30, test.scaled$yield)**2
+rf.pred40.r2 <- cor(rf.pred40, test.scaled$yield)**2
+rf.pred50.r2 <- cor(rf.pred50, test.scaled$yield)**2
+rf.pred60.r2 <- cor(rf.pred60, test.scaled$yield)**2
+rf.pred70.r2 <- cor(rf.pred70, test.scaled$yield)**2
+
+# RMSE
+rf.pred2.5.rmse <- rmse(rf.pred2.5, test.scaled$yield)
+rf.pred5.rmse <- rmse(rf.pred5, test.scaled$yield)
+rf.pred10.rmse <- rmse(rf.pred10, test.scaled$yield)
+rf.pred20.rmse <- rmse(rf.pred20, test.scaled$yield)
+rf.pred30.rmse <- rmse(rf.pred30, test.scaled$yield)
+rf.pred40.rmse <- rmse(rf.pred40, test.scaled$yield)
+rf.pred50.rmse <- rmse(rf.pred50, test.scaled$yield)
+rf.pred60.rmse <- rmse(rf.pred60, test.scaled$yield)
+rf.pred70.rmse <- rmse(rf.pred70, test.scaled$yield)
+
+# create data frame containing RMSE and R^2 data for sparsity models
+df <- data.frame(rmse = c(rf.pred2.5.rmse, 
+                          rf.pred5.rmse, 
+                          rf.pred10.rmse, 
+                          rf.pred20.rmse, 
+                          rf.pred30.rmse, 
+                          rf.pred50.rmse, 
+                          rf.pred70.rmse),
+                 r2 = c(rf.pred2.5.r2, 
+                        rf.pred5.r2, 
+                        rf.pred10.r2, 
+                        rf.pred20.r2, 
+                        rf.pred30.r2, 
+                        rf.pred50.r2, 
+                        rf.pred70.r2))
+row.names(df) <- c('2.5%', '5%', '10%', '20%', '30%', '50%', '70%')
+
+# Plot RMSE and R^2 data
+rmse.plot <- ggplot(df, aes(y=reorder(rownames(df), -rmse), x=rmse)) +
+  geom_point() +
+  geom_text(label=round(df$rmse, 1), vjust=-1, size=2.5) +
+  labs(x='RMSE', y='Training Set Data') +
+  xlim(0, 20) +
+  coord_flip()
+r2.plot <- ggplot(df, aes(y=reorder(rownames(df), -rmse), x=r2)) +
+  geom_point() +
+  geom_text(label=round(df$r2, 2), vjust=-1, size=2.5) +
+  labs(x='Rsquared', y='Training Set Data') +
+  xlim(0.5, 1) +
+  coord_flip()
+plots <- arrangeGrob(r2.plot, rmse.plot, ncol=2)
+ggsave(plots, file="R/plots/rf_sparsity_r2_rmse.png", width=6, height=2.5)
+
+```
+
+Feature importance plots for random forest
+
+```{r - feature importance}
+
+# ============================================================================
+# Random forest: Plotting variable importance
+# ============================================================================
+
+# read in variable importance from trained random forest model
+rf_imp <- importance(rfFit70$finalModel)
+rf.imp.df <- cbind(as.data.frame(rf_imp), names(rf_imp[, 1]))
+colnames(rf.imp.df)[1] <- "IncMSE"
+colnames(rf.imp.df)[3] <- "descriptor"
+
+# for descriptor names, replace "_" with " " and "." with "*"
+rf.imp.df$descriptor <- gsub("_", " ", rf.imp.df$descriptor)
+rf.imp.df$descriptor <- gsub("[.]", "*", rf.imp.df$descriptor)
+
+# capitalize descriptor names
+simpleCap <- function(x) {
+  s <- strsplit(x, " ")[[1]]
+  paste(toupper(substring(s, 1, 1)), substring(s, 2),
+        sep="", collapse=" ")
+}
+rf.imp.df$descriptor <- sapply(rf.imp.df$descriptor, simpleCap)
+
+# plot variable importance (top 10 descriptors)
+p1 <- ggplot(rf.imp.df[rf.imp.df$IncMSE>22, ], aes(x=reorder(descriptor, IncMSE), y=IncMSE)) +
+  geom_bar(stat="identity") +
+  scale_y_continuous(labels = comma) +
+  labs(x="", y="Increase in Mean Squared Error (%)") + 
+  coord_flip()
+ggsave(p1, file="R/plots/rf_importance.png", width=6, height=2.25)
+
+# plot variable importance (descriptors above 15% IncMSE) - Supporting Information
+p1 <- ggplot(rf.imp.df[rf.imp.df$IncMSE>15, ], aes(x=reorder(descriptor, IncMSE), y=IncMSE)) +
+  geom_bar(stat="identity") +
+  scale_y_continuous(labels = comma) +
+  labs(x="", y="Increase in Mean Squared Error (%)") + 
+  coord_flip()
+ggsave(p1, file="R/plots/rf_importance_SI.png", width=6, height=4)
+
+
+```
+
+'###### SKIP ##################################################################
+'# ============================================================================
+'# Plotting *C3 NMR Shift vs Yield
+'# ============================================================================
+
+'###### SKIP ##################################################################
+'# ============================================================================
+'# Random forest: Train and test each aryl halide individually
+'# ============================================================================
+
+'###### CONTINUE ###############################################################
+'# ============================================================================
+'# Random forest: Predict ArCl and ArI from ArBr
+'# ============================================================================
+
+Ability for model trained on one set of compounds to predict another is tested.
+This can be seen as a basic test of cross-compound generalizeability.
+* Will be very interesting to observe/compare drivers via SHAP.
+* What does SHAP suggest regarding drivers of cross-compatibility?
+* How do these drivers compare to drivers in standard/general model?
+
+```{r - Cross-compound generalizeability}
+# ============================================================================
+# Random forest: Predict ArCl and ArI from ArBr
+# ============================================================================
+
+# Random forest (ArBr)
+set.seed(8915)
+rfFit.ArBr.all <- train(yield ~ ., data=ArBr.scaled, trControl=train_control, method="rf", importance=TRUE)
+saveRDS(rfFit.ArBr.all, "rds/rfFit_ArBr_all.rds")
+
+# Test on ArCl
+ClfromBr <- predict(rfFit.ArBr.all, ArCl.scaled)
+ClfromBr.r2 <- cor(ClfromBr, ArCl.scaled$yield)**2
+ClfromBr.rmse <- rmse(ClfromBr, ArCl.scaled$yield)
+df1 <- data.frame(x = ClfromBr, 
+                  y = ArCl.scaled$yield)
+
+# Create calibration plot (predict Cl from Br random forest model)
+p1 <- ggplot(df1, aes(x = x, y = y)) +
+  geom_point(alpha = 0.4) + 
+  scale_x_continuous(breaks = seq(0,100,25), lim=c(0, 100)) +
+  labs(x='Predicted Yield', y='Observed Yield') +  
+  geom_segment(aes(x=0, xend=100, y=0, yend=100), linetype="dashed") +
+  geom_smooth(method="loess", se=FALSE)
+ggsave(file="R/plots/ClfromBr.png", width=5, height=4)
+
+# Test on ArI
+IfromBr <- predict(rfFit.ArBr.all, ArI.scaled)
+IfromBr.r2 <- cor(IfromBr, ArI.scaled$yield)**2
+IfromBr.rmse <- rmse(IfromBr, ArI.scaled$yield)
+df2 <- data.frame(x = IfromBr, 
+                  y = ArI.scaled$yield)
+
+# Create calibration plot (predict I from Br random forest model)
+p2 <- ggplot(df2, aes(x = x, y = y)) +
+  geom_point(alpha = 0.4) + 
+  scale_x_continuous(breaks = seq(0,100,25), lim=c(0, 100)) +
+  labs(x='Predicted Yield', y='Observed Yield') +  
+  geom_segment(aes(x=0, xend=100, y=0, yend=100), linetype="dashed") +
+  geom_smooth(method="loess", se=FALSE)
+ggsave(file="R/plots/IfromBr.png", width=5, height=4)
+
+
+```
+
+'###### SKIP ##################################################################
+'# ============================================================================
+'# Random forest: Predicting pyridyl substrates from nonpyridyl ones
+'# ============================================================================
+
+'###### CONTINUE ###############################################################
+'# ============================================================================
+'# Random forest: Predicting yields > 80% from yields < 80%
+'# ============================================================================
+
+The ability for the model to infer beyond its original training scope is tested further.
+Here, the challenging -- nigh impossible -- task of testing whether the model generalizes beyond assumed physical limitations.
+* Perhaps something requested by a reviewer, as it does not seem to make much sense in the regression context
+* Might be interesting to compare these results with those from another RF model trainied using SHAP values.
+
+```{r - Predicting yields > 80% from yields < 80%}
+# ============================================================================
+# Random forest: Predicting yields > 80% from yields < 80%
+# ============================================================================
+
+# Train random forest model using yields < 80%
+set.seed(8915)
+rfFit.under80 <- train(yield ~ ., data=output.under80, trControl=train_control, method="rf", importance=TRUE)
+saveRDS(rfFit.under80, "rds/rfFit_under80.rds")
+
+# Predict yields for reactions > 80%
+over80pred <- predict(rfFit.under80, output.over80)
+over80pred.r2 <- cor(over80pred, output.over80$yield)**2
+over80pred.rmse <- rmse(over80pred, output.over80$yield)
+
+# Generate calibration plot
+df <- data.frame(x = over80pred, 
+                 y = output.over80$yield)
+p1 <- ggplot(df, aes(x = x, y = y)) +
+  geom_point(alpha = 0.4) + 
+  scale_x_continuous(breaks = seq(0, 100, 25), lim=c(0, 100)) +
+  labs(x='Predicted Yield', y='Observed Yield') +  
+  geom_segment(aes(x=0, xend=100, y=0, yend=100), linetype="dashed") +
+  geom_smooth(method="loess", se=FALSE)
+ggsave(file="R/plots/over80pred.png", width=5, height=4)
+```
+
+####### XGBoost/SHAP ##########################################################################################
+1. Check yield histograms to determine cut off for binary probability
+2. Create two predictor datasets: a) scaled and b) nominal
+3. Setup and run initial XGBoost models
+** configure hyperparameters
+** cross validation, to derive iteration limit (then x2)
+** train models a and b
+** bubble-plot 3D importance for a and b
+4. Apply SHAP
+5. Evaluate/confirm pattency of SHAP wrt implied mechanisms
+6. Explore usage of SHAP-derived effect matrix for linear yield prediction task
+7. Explore usage of SHAP as "synthetic data" in original RF (i.e., is SHAP better way of normalizing data for RF)
+8. Benchmark: original RF vs SHAP-normalized RF vs parameter-free "emperical boost!" (tm) regression tree
+________________________________________________________________________________________________________________
+
+```{r - check histogram yields}
+#install.packages('magick')
+
+img <- magick::image_read("yield_data/allplates_histogram.png")
+plot(img) # or print(img)
+
+
+```
+
+Load predictor (descriptor) data from external files
+* Same as original, but with data.table
+
+```{r - create datatables}
+
+# load output table generated by python script
+output.table <- fread("R/output_table.csv", header=TRUE)
+
+# scale the descriptor data
+output.scaled <- as.data.table(scale(output.table))
+
+# create the same for nominal data
+output.nominal <- output.table
+
+```
+
+Refers to previous chunk and should execute via reference, but doesn't (Rstudio bug?).
+Need to tab up to original chunk and execute manually.
+
+```{r - refresh data}
+
+# Plate 1.1
+plate1.1 <- data.table::fread("yield_data/plate1.1.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate1.1_pdt <- plate1.1$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate1.1_pdt))
+dim(plate.data) <- c(24,16)
+plate.data1.1 <- t(plate.data)
+
+# Plate 1.2
+plate1.2 <- data.table::fread("yield_data/plate1.2.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate1.2_pdt <- plate1.2$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate1.2_pdt))
+dim(plate.data) <- c(24,16)
+plate.data1.2 <- t(plate.data)
+
+# Plate 1.3
+plate1.3 <- data.table::fread("yield_data/plate1.3.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate1.3_pdt <- plate1.3$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate1.3_pdt))
+dim(plate.data) <- c(24,16)
+plate.data1.3 <- t(plate.data)
+
+# Plate 1.4
+plate1.4 <- data.table::fread("yield_data/plate1.4.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate1.4_pdt <- plate1.4$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate1.4_pdt))
+dim(plate.data) <- c(24,16)
+plate.data1.4 <- t(plate.data)
+
+# stitch Plate 1 together into one 32x48 matrix
+plate1.top <- cbind(plate.data1.1, plate.data1.2)
+plate1.bottom <- cbind(plate.data1.3, plate.data1.4)
+plate1 <- rbind(plate1.top, plate1.bottom)
+
+# Plate 2.1
+plate2.1 <- data.table::fread("yield_data/plate2.1.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate2.1_pdt <- plate2.1$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate2.1_pdt))
+dim(plate.data) <- c(24,16)
+plate.data2.1 <- t(plate.data)
+
+# Plate 2.2
+plate2.2 <- data.table::fread("yield_data/plate2.2.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate2.2_pdt <- plate2.2$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate2.2_pdt))
+dim(plate.data) <- c(24,16)
+plate.data2.2 <- t(plate.data)
+
+# Plate 2.3
+plate2.3 <- data.table::fread("yield_data/plate2.3.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate2.3_pdt <- plate2.3$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate2.3_pdt))
+dim(plate.data) <- c(24,16)
+plate.data2.3 <- t(plate.data)
+
+# Plate 2.4
+plate2.4 <- data.table::fread("yield_data/plate2.4.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate2.4_pdt <- plate2.4$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate2.4_pdt))
+dim(plate.data) <- c(24,16)
+plate.data2.4 <- t(plate.data)
+
+# stitch Plate 2 together into one 32x48 matrix
+plate2.top <- cbind(plate.data2.1, plate.data2.2)
+plate2.bottom <- cbind(plate.data2.3, plate.data2.4)
+plate2 <- rbind(plate2.top, plate2.bottom)
+
+# Plate 3.1
+plate3.1 <- data.table::fread("yield_data/plate3.1.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate3.1_pdt <- plate3.1$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate3.1_pdt))
+dim(plate.data) <- c(24,16)
+plate.data3.1 <- t(plate.data)
+
+# Plate 3.2
+plate3.2 <- data.table::fread("yield_data/plate3.2.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate3.2_pdt <- plate3.2$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate3.2_pdt))
+dim(plate.data) <- c(24,16)
+plate.data3.2 <- t(plate.data)
+
+# Plate 3.3
+plate3.3 <- data.table::fread("yield_data/plate3.3.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate3.3_pdt <- plate3.3$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate3.3_pdt))
+dim(plate.data) <- c(24,16)
+plate.data3.3 <- t(plate.data)
+
+# Plate 3.4
+plate3.4 <- data.table::fread("yield_data/plate3.4.csv", header=TRUE, stringsAsFactors=FALSE, na.strings = "#DIV/0!")
+plate3.4_pdt <- plate3.4$product_scaled[1:384]
+plate.data <- as.matrix(as.numeric(plate3.4_pdt))
+dim(plate.data) <- c(24,16)
+plate.data3.4 <- t(plate.data)
+
+# stitch Plate 3 together into one 32x48 matrix
+plate3.top <- cbind(plate.data3.1, plate.data3.2)
+plate3.bottom <- cbind(plate.data3.3, plate.data3.4)
+plate3 <- rbind(plate3.top, plate3.bottom)
+```
+
+Generate yield data from loaded and processed yield
+
+```{r - qc yield data}
+
+# Remove reactions without additive and reactions with additive 7
+plate1_nocontrols <- plate1[c(-1,-5,-9,-13,-20,-24,-28,-32), c(-16,-32,-48)] 
+# Remove reactions without aryl halide
+plate2_nocontrols <- plate2[, c(-16,-32,-48)]
+plate3_nocontrols <- plate3[, c(-16,-32,-48)]
+plate1_nocontrols_v <- as.vector(t(plate1_nocontrols))
+plate2_nocontrols_v <- as.vector(t(plate2_nocontrols))
+plate3_nocontrols_v <- as.vector(t(plate3_nocontrols))
+yield_data <- c(plate1_nocontrols_v, plate2_nocontrols_v, plate3_nocontrols_v)
+
+```
+
+Create binary labels for yield
+
+```{r - create binary yield variables}
+# based on histogram, scaled yield = c(0, <=.05, and <=.10) will be included
+
+yield_label <- as.data.table(yield_data)
+yield_label <- yield_label[, `:=` (`yield=0%` = if_else(yield_data == 0,0,1),
+                                   `yield<=5%` = if_else(yield_data <= 5,0,1),
+                                   `yield<=10%` = if_else(yield_data <= 10,0,1))]
+
+```
+
+Add mutliple label data to predictor data
+
+```{r - add yield to nominal and scaled tables}
+
+#remove original yield column, rearrange to place at start of table/s
+output.nominal <- cbind(yield_label,output.nominal)
+output.scaled <- cbind(yield_label,output.scaled)
+
+# remove rows where yield=NA
+output.nominal <- output.nominal[!(is.na(output.nominal$yield_data)), ]
+output.scaled <- output.scaled[!(is.na(output.scaled$yield_data)), ]
+
+
+# control; keep only rows where yield=NA
+#output.control.scaled <- output.scaled[(is.na(output.scaled$yield)), ]
+
+
+```
+
+Data split for initial CV
+
+```{r - generate datasets for training/cv}
+
+# Set sample ratio for 70/30 split
+sample.ratio = 0.7
+
+# Split scaled into training and test set (70/30)
+set.seed(1084)
+size <- round(sample.ratio*nrow(output.scaled))
+training <- sample(nrow(output.scaled), size=size, replace=FALSE)
+training.scaled <- output.scaled[training,]
+test.scaled <- output.scaled[-training,]
+
+# Split nominal into training and test set (70/30)
+set.seed(1084)
+size <- round(sample.ratio*nrow(output.nominal))
+training <- sample(nrow(output.nominal), size=size, replace=FALSE)
+training.nominal <- output.nominal[training,]
+test.nominal <- output.nominal[-training,]
+
+```
+
+Generate individual datasets to be tested
+
+```{r - datasets according to yield definition}
+
+## data nominal, yield <= 0
+dtrain.nominal.01 <- xgb.DMatrix(data = as.matrix(training.nominal[, -(1:4)]), 
+                                 label = as.matrix(training.nominal[, 2])) ## yield = 0
+
+## data nominal, yield <= 5%
+dtrain.nominal.05 <- xgb.DMatrix(data = as.matrix(training.nominal[, -(1:4)]), 
+                                 label = as.matrix(training.nominal[, 3])) ## yield <= 5%
+
+## data nominal, yield <= 10%
+dtrain.nominal.10 <- xgb.DMatrix(data = as.matrix(training.nominal[, -(1:4)]), 
+                                 label = as.matrix(training.nominal[, 4])) ## yield <= 10%
+
+```
+
+Yield = 0 is technically the most correct classification criteria; however, here we imgaine this a three-way classification task aggregated back down to two: 1) no rxn, 2) insignificant rxn, and 3) good rxn -> 1) no/insignificant rxn and 2) good rxn. This ensures predictive structure sensitive to yield-relevant considerations that may or may not function independently from factors determining rxn success. This is implied by original manuscript wrt the resasoning behind including and testing various additives known to suppress reactivity: suppression of reactivity and possibility of reaction are statistically different.
+
+XGBoost cross validations setup
+
+```{r - xgboost cv run, include=FALSE}
+
+## model parameters
+# variable parameters, per literature etc
+max_depth <- 12 ## 200% of default; set to typical QSAR complexity (i.e., set to reflect presumed mechanistic scope)
+nrounds <- 10000 ## upper limit used for CV
+nfold <- 10 ## save value as original paper
+
+# parameter list
+XGB_model_1_params <- list(objective = "binary:logistic",  ## specifies additive logistic repression
+                           base_score = .95, ## weight of evidence per branch (quasi-confidence); increase from .5 default to .95
+                           eval_metric = "error@.95", ## weight of evidence for entire tree; increase from .5 default to .95
+                           max_depth = max_depth, ## adjusts presumed model complexity (wrt interaction scope and variable df)
+                           ## up to this point we have specified XGBoost to perform stagewise additive logistic regression
+                           ## statistical confidence specified to be consistent with traditional statistical standards
+                           ## so, here we exploit the machinery of XGBoost to facilitate "high throughput hypothesis testing"
+                           colsample_bytree = .5, ## implements RandomForest, at 50%
+                           num_parallel_tree = 6, ## number of parallel trees for RandomForest; set to number of CPU cores
+                           ## here we implement RandomForest
+                           ## per the above, XGBoost is being used in an HTE context; RF therefore increases solution space
+                           eta = .003, ## learning rate; 1% of default, to maximize "forgetting" and increase solution space
+                           max_bin = 512, ## max granularity of binning operation; 200% default to increase solution space
+                           ## the above increases weight/visibility of lower incidence features and feature combinations
+                           #subsample = 1, ## randomizes observations per tree; NOT implemented in favor of hyp-driven sampling 
+                           predictor = "cpu_predictor", ## force CPU implementation
+                           booster = "gbtree", ## standard boosted tree
+                           ## addition of multiple, simultaneous eval metrics intended to force exhaustive solution search
+                           ## emphasis on positive and negative prediction, as both are hypothesized to be causally independent
+                           eval_metric = "aucpr", ## optimizes precision-recall tradeoff
+                           eval_metric = "auc", ## optimizes sensitivty-specifity tradeoff
+                           eval_metric = "ndcg", ## optimizes for gain order ranking
+                           eval_metric = "map", ## optimizes mean absolute precision
+                           eval_metric = "logloss", ## optimizes neg log of loss value
+                           ## clearly, computation run times are NOT our concern; our goal is internal precision / model validity
+                           ## implicit goal is to exhaustively map an optimal solution space wrt both features and cases
+                           ## this solution space is what will be used by SHAP to impute feature effect and is therefore crucial
+                           silent = "1") ## output warnings to console during training
+
+
+# cross validation
+XGB_Model_1_CV.10 <- xgboost::xgb.cv(data = dtrain.nominal.10,
+                                     params = XGB_model_1_params,
+                                     nrounds = nrounds,
+                                     early_stopping_rounds = 10,
+                                     nfold = nfold,
+                                     #folds = `CV-FOLDS`, ## folds definitions
+                                     prediction = T)  
+
+```
+
+And now we check performance...
+
+```{r - cv performance}
+# model AUC
+plot(pROC::roc(response = as.matrix(training.nominal[, 4]),
+               predictor = XGB_Model_1_CV.10$pred,
+               levels=c(0, 1)),
+     lwd=1.5,
+     auc.polygon=TRUE,
+     print.auc=TRUE) 
+
+# plot, predicted probability vs actual yield
+plot(XGB_Model_1_CV.10$pred, unlist(training.nominal[, 1]))
+# correlations
+paste0("correlation, rxn probability vs yield = ",
+       cor(XGB_Model_1_CV.10$pred, unlist(training.nominal[, 1]) %>% as.numeric())  %>% round(3))
+
+```
+
+
+Cross validation suggests a model with state-of-the-art predictive power out-of-the-box, with no a posteriori "tuning" of parameters: AUC = 98.4%.
+This results indicate that regardless of how the model is calibrate wrt classification threshold, risk associated with false negs and false pos is minimal.
+The degree to which results hold up under generalized contexts will be explored shortly; however, we first examine model output in terms of emperical validity.
+
+Cross validation produces preliminary probability predictions; results here suggest our hypothesis wrt yield being a function of rxn probability has merit.
+Correlation between the two valies is reasonably high, at 70.5%, and a simple linear regression produces a respectable R^2 of .497.
+
+That said, these results are far away from state of the art wrt emperical alignment.
+
+A quick plot demonstrates an m-shaped probability distribution, which, given the binary nature of our response function, is reasonable albeit undesirable.
+In our experience, the SHAP transformation -- from probabilities to emperically "recentered" (conditioned) likelihoods (log-RR) -- potentially address this.
+
+Accordingly, next steps are as follows -- 1) generate predictive xgboost model, 2) generate explanatory SHAP model, and 3) evaluate/characterize SHAP model
+
+
+```{r - xgboost model, include=FALSE}
+
+# set nrounds to 2x CV value
+nrounds = XGB_Model_1_CV.10$best_iteration * 2 
+#> XGB_Model_1_CV.10$best_iteration
+#[1] 3193
+
+# nrounds set to 2x CV result
+XGB_model_1.10 <- xgboost::xgboost(data = dtrain.nominal.10,
+                                   params = XGB_model_1_params, 
+                                   nrounds = nrounds, ## nrounds either default or adjusted to CV results
+                                   early_stopping_rounds = 10)
+
+# generate diagnostic predictions for training data
+XGB_model_1.10.Predict.Train <- xgboost:::predict.xgb.Booster(XGB_model_1.10, as.matrix(training.nominal[, -(1:4)]))
+
+# model AUC
+plot(pROC::roc(response = as.matrix(training.nominal[, 4]),
+               predictor = XGB_model_1.10.Predict.Train,
+               levels=c(0, 1)),
+     lwd=1.5,
+     auc.polygon=TRUE,
+     print.auc=TRUE) 
+
+#save
+xgb.save(XGB_model_1.10, "xgboost.model")
+
+```
+Full XGBoost model seems to be fit perfectly, which has traditionally been a cause for alarm.
+We now take a peek at the test data...
+
+```{r - test evaluation}
+
+# generate diagnostic predictions for training data
+XGB_model_1.10.Predict.Test <- xgboost:::predict.xgb.Booster(XGB_model_1.10, as.matrix(test.nominal[, -(1:4)]))
+
+# model AUC
+plot(pROC::roc(response = as.matrix(test.nominal[, 4]),
+               predictor = XGB_model_1.10.Predict.Test,
+               levels=c(0, 1)),
+     lwd=1.5,
+     auc.polygon=TRUE,
+     print.auc=TRUE) 
+
+```
+
+
+With an AUC of 98.2%, OOS results -- representing 30% of the full dataset -- are definitively state-of-the-art. 
+
+As previously noted, this chart represents model selectivity across all possible classification thresholds. The question being answered can be see as "to what degree is the underlying model sound with respect to mechanistic implications?". As suggestd by these results, predictive performance no longer needs to be our primary concern -- given sufficient data, these models perform remarkably well. We therefore, prior to assessing classification performance, take a closer look at the predictive substrucutre informing the performance of this model.
+
+Table and Bubble Plot of Feature Performance metrics
+
+```{r - feature evaluation}
+
+# chart data
+XGB_model_1.10.Importance <- xgb.importance(model = XGB_model_1.10) 
+XGB_model_1.10.Importance$Gain <- round(XGB_model_1.10.Importance$Gain, 5)*100
+XGB_model_1.10.Importance$Frequency <- round(XGB_model_1.10.Importance$Frequency, 5)*100
+XGB_model_1.10.Importance$Cover <- round(XGB_model_1.10.Importance$Cover, 5)*100
+XGB_model_1.10.Importance <- XGB_model_1.10.Importance[(Cover+Gain+Frequency) > 0,]
+(XGB_model_1.10.Importance)
+
+#define and save chart
+XGB_model_1.10.Bubble <- XGB_model_1.10.Importance %>%
+  ggplot(aes(x=Cover, y=Frequency, size=Gain, colors = Feature)) +
+    geom_point(alpha=0.5) +
+    scale_size(range = c(.1, 24), name="Gain") 
+
+#plotly
+  ggplotly(XGB_model_1.10.Bubble)
+
+```
+
+This plot combines three complementary performance metrics to visually provided a better understanding of how the various features inform the predictions produced by XGBoost (compared to traditional statistical models). Here, we argue that the two remaining, generally overlooked metrics – frequency and cover – deserve to be considered in a new light. Cover, which indicates the percentage of cases for which a given feature is relevant with respect to prediction, can be seen as a heuristic measure of overall significance. And frequency, which is a measure of how often the model tries to fit a given variable into predictive iterations, can be seen as a heuristic measure of predictive ambiguity. The standard, well known metric indicative of the degree to which omission of a given feature reduces the degree of variation represented by your model, is referred to as "gain" and indicated by bubble size.
+
+The predictive substructure revealed above demonstrates a key, but overlooked reality regarding machine learning: the source of it's predictive performance.
+Note that about 50% of classification performance comes from ~10 features. This is consistent with the common statistical wisdom and results form Doyle et al.
+Regardless of the methodology used, basic linear regression or state-of-the-art neural network, performance is a function of feature set size and diversity.
+We argue that the primary difference between models is in their ability to separably extract information from increasingly larger and complex sets of data.
+And machine learning, particularly tree-based methods, provides for mathematically & statistically tractable way to exploit sources of "subprime" information.
+* refer to XX for a discussion and proof demonstrating the mathematical equivalence of boosted classification trees and stagewise additive logistic regression.
+
+As shown above, the bottom-left quadrant (low cover, low frequency) -- features that would have been ignored or tossed under traditional statistical regimes -- is home to a substantial proportion of the predictive information driving this model. Absent that, this model performs no better than standard LR. Up to now, estimation of feature effects (wrt magnitude and direction) has been exclusive to linear models. Recent developments have no turned this paradigm on its head.
+
+The next step involves generation of effect estimates akin to those produced by traditional linear models; this is new to the world of machine learning.
+However, Shapely takes this a step further by providing local, case-wise effect estimations which allows for a new dimension of exploratory validation.
+
+___________________________________
+
+Shapley values
+
+```{r - Shapley}
+  
+# generate SHAP model
+XGB_model_1.10.SHAP <- shap.values(xgb_model = XGB_model_1.10, X_train = as.matrix(training.nominal[, -(1:4)]))
+
+# eval classification performance
+# generate prediction
+XGB_model_1.10.SHAP.Bin <- rowSums(XGB_model_1.10.SHAP$shap_score) ## generate prediction
+XGB_model_1.10.SHAP.Bin <- ifelse(XGB_model_1.10.SHAP.Bin < 0, "YieldInsig", "YieldPositive") %>% factor()
+# evaluate
+XGB_model_1.10.SHAP.Eval <- caret::confusionMatrix(XGB_model_1.10.SHAP.Bin, as.matrix(training.nominal[, 4]) %>%
+                                                                factor(labels = c("YieldInsig", "YieldPositive")), positive = "YieldPositive")
+(XGB_model_1.10.SHAP.Eval)
+
+# generate SHAP visualization
+shap.plot.summary.wrap2(shap_score = XGB_model_1.10.SHAP$shap_score,
+                        X = as.matrix(training.nominal[, -(1:4)]),
+                        top_n = 20)
+                        
+# generate SHAP clusters
+shap.plot.force_plot_bygroup(shap.prep.stack.data(shap_contrib = XGB_model_1.10.SHAP$shap_score, top_n = 20, n_groups = 6) )
+
+
+```
+SHAP generates an effect matrix consisiting of the predicted marginal contribution of each feature wrt a given predictive outcome.
+These values are additive wrt the log relative risk of event (reaction); in addition to effect estimations, SHAP also calculates a "bias" term.
+Bias is the intercept term and is, by definition, the same for all cases; however, in this context, the bias terms also indicates "base probability of event".
+Mathematically, this is the value separating positive and negative results -- in other words, SHAP inadvertently generates a classification threshold. 
+This classification threshold is empirically grounded: SHAP generates this effect matrix based on an optimization model derived from cooperative game theory.
+
+Classification models have always suffered dt lack of a priori, emperically-grounded thresholds for classifying cases based on predicted probabilites.
+Classification thresholds have either been determined arbitrarily (50% cutoff) or according to the inherently biasing practice of AUC optimization.
+
+Accordingly, up to this point, we have refrained from arbitrarily assigning or generating a classification threshold in order to interpret the XGBoost results.
+Note (below) the ability to convert the SHAP-generated bias back to a probability and set as a the classification threshold for the original XGBoost model.
+Predictive output from XGBoost and SHAP are mathematically equivalent {XGBoost_Prob(Yield) = exp(SHAP)/(1+exp(SHAP))} -- we will therefore henceforth ignore the former.
+
+Summary: XGBoost was used -- not to generate a prediction, but... -- to, in a high-throughput fashion, develop a high-fidelity predictive substructure to be extracted by SHAP.
+
+
+```{r - eval of training data using SHAP bias as threshold}
+
+# eval classification performance
+XGB_model_1.10.SHAP.Threshold <- exp(XGB_model_1.10.SHAP$BIAS0)/(1+exp(XGB_model_1.10.SHAP$BIAS0))
+# generate prediction
+XGB_model_1.10.Test.Bin <- ifelse(XGB_model_1.10.Predict.Test < XGB_model_1.10.SHAP.Threshold$BIAS, "YieldInsig", "YieldPositive") %>% factor()
+# evaluate
+XGB_model_1.10.Test.Eval <- caret::confusionMatrix(XGB_model_1.10.Test.Bin, as.matrix(test.nominal[, 4]) %>%
+                                                                factor(labels = c("YieldInsig", "YieldPositive")), positive = "YieldPositive")
+(XGB_model_1.10.Test.Eval)
+
+```
+
+Here too, OOS results are exceptional -- especially when considerting that the classification threshold was determined a priori via SHAP -- not after-the-fact to optimize performance.
+___________
+
+Now lets test correlation of SHAP vs yield -- recall that SHAP values are the log relative risk of yield > 10% {P(yield > 10% | BIAS_BaselineProbability)} -- we can suppose there to be many arguments as to why this comparision is or is not appropriate; however, looking to our DFT forefathers for inspiration, we unabashedly declare this to be "just an approximation". 
+
+```{r - SHAP vs Yield}
+
+# make correlation dataset
+XGB_model_1.10.SHAP.Corr <- cbind(rowSums(XGB_model_1.10.SHAP$shap_score), unlist(training.nominal[, 1])) %>% data.table()
+colnames(XGB_model_1.10.SHAP.Corr) <- c("SHAP", "Yield")
+
+# plot, log-RR (SHAP) vs actual yield
+plot(XGB_model_1.10.SHAP.Corr$SHAP, XGB_model_1.10.SHAP.Corr$Yield)
+# correlations, log-RR (SHAP) vs actual yield
+cor(XGB_model_1.10.SHAP.Corr$SHAP, XGB_model_1.10.SHAP.Corr$Yield)
+#[1] 0.8059208
+
+
+# create SHAP0, where neg values are set to zero
+XGB_model_1.10.SHAP.Corr[, SHAP0 := ifelse(SHAP<=0,0,SHAP)]
+
+# rerun correlations
+plot(XGB_model_1.10.SHAP.Corr$SHAP0, XGB_model_1.10.SHAP.Corr$Yield)
+cor(XGB_model_1.10.SHAP.Corr$SHAP0, XGB_model_1.10.SHAP.Corr$Yield)
+#[1] 0.8348504
+
+# lets try linear model
+#shap
+lm(XGB_model_1.10.SHAP.Corr$Yield ~ XGB_model_1.10.SHAP.Corr$SHAP) %>% summary()
+#Adjusted R-squared:  0.6494 
+#shap0
+lm(XGB_model_1.10.SHAP.Corr$Yield ~ XGB_model_1.10.SHAP.Corr$SHAP0) %>% summary()
+#Adjusted R-squared:  0.6969 
+
+```
+Substantial correlation is clearly evident, particular when the negative SHAP values transformed to zero (per Doyle et al).
+Simple LM worked well, yield as a function of aggregate SHAP score; R^2 has substantially improved vs the untransformed probabilities generated by XGBoost (.64 and .69 vs .50, resp.).
+
+Next, we continue this direction by expanding to the context of multiple regression; yield as a function of the top 20 features.
+It must be noted that aggregate SHAP score and individual SHAP feature values are both independent to and additive with respect to each other.
+By definition, the SHAP value is heuristically calculated in such a way (deduction) that the association between the predictive outcome and each feature (grouping) is maximally valid.
+
+```{r - multiple regression model with arbitrary n}
+
+# define data for lm that sorts and includes only the top features, per mean shap
+# create subset for lm
+XGB_model_1.10.SHAP.lm <- cbind(Yield = XGB_model_1.10.SHAP.Corr$Yield, 
+                                XGB_model_1.10.SHAP$shap_score[, .SD, .SDcols = head(names(XGB_model_1.10.SHAP$mean_shap_score), n=20)])
+
+# calling by names errors, so wont do
+# execute with top 20
+# Multiple R-squared:  0.7087,	Adjusted R-squared:  0.7066 
+lm(XGB_model_1.10.SHAP.lm$Yield ~ 
+       XGB_model_1.10.SHAP.lm[[2]] + 
+       XGB_model_1.10.SHAP.lm[[3]] + 
+       XGB_model_1.10.SHAP.lm[[4]] + 
+       XGB_model_1.10.SHAP.lm[[5]] + 
+       XGB_model_1.10.SHAP.lm[[6]] + 
+       XGB_model_1.10.SHAP.lm[[7]] + 
+       XGB_model_1.10.SHAP.lm[[8]] + 
+       XGB_model_1.10.SHAP.lm[[9]] + 
+       XGB_model_1.10.SHAP.lm[[10]] + 
+       XGB_model_1.10.SHAP.lm[[11]] + 
+       XGB_model_1.10.SHAP.lm[[12]] + 
+       XGB_model_1.10.SHAP.lm[[13]] +
+       XGB_model_1.10.SHAP.lm[[14]] +
+       XGB_model_1.10.SHAP.lm[[15]] +
+       XGB_model_1.10.SHAP.lm[[16]] +
+       XGB_model_1.10.SHAP.lm[[17]] +
+       XGB_model_1.10.SHAP.lm[[18]] +
+       XGB_model_1.10.SHAP.lm[[19]] +
+       XGB_model_1.10.SHAP.lm[[20]] +
+       XGB_model_1.10.SHAP.lm[[21]]
+   ) %>% summary()
+
+# execute with top 12
+# Multiple R-squared:  0.6922,	Adjusted R-squared:  0.691 
+lm(XGB_model_1.10.SHAP.lm$Yield ~ 
+       XGB_model_1.10.SHAP.lm[[2]] + 
+       XGB_model_1.10.SHAP.lm[[3]] + 
+       XGB_model_1.10.SHAP.lm[[4]] + 
+       XGB_model_1.10.SHAP.lm[[5]] + 
+       XGB_model_1.10.SHAP.lm[[6]] + 
+       XGB_model_1.10.SHAP.lm[[7]] + 
+       XGB_model_1.10.SHAP.lm[[8]] + 
+       XGB_model_1.10.SHAP.lm[[9]] + 
+       XGB_model_1.10.SHAP.lm[[10]] + 
+       XGB_model_1.10.SHAP.lm[[11]] + 
+       XGB_model_1.10.SHAP.lm[[12]] 
+   ) %>% summary()
+
+# execute with top 5
+# Multiple R-squared:  0.5286,	Adjusted R-squared:  0.5279 
+ 
+lm(XGB_model_1.10.SHAP.lm$Yield ~ 
+       XGB_model_1.10.SHAP.lm[[2]] + 
+       XGB_model_1.10.SHAP.lm[[3]] + 
+       XGB_model_1.10.SHAP.lm[[4]] + 
+       XGB_model_1.10.SHAP.lm[[5]] 
+   ) %>% summary()
+
+```
+
+Next, we recall and compare results from Doyle et al...
+
+```{r}
+
+ml_models.png <- magick::image_read("R/plots/ml_models.png")
+plot(ml_models.png) # or print(img)
+
+```
+
+Interim Summary:
+So, without much work, SHAP was able to produce -- from a binary classification task -- yield prediction that rivals classical machine learned models trained on a regression task (kNN, SVM, linear model, Bayes GLM). Results are still far below those neural network and random forest, but.... this is to be expected.
+
+A more interesting test will be to substitue the scaled data used by Doyle et al, with the SHAP data and rerun the RandomForest. However, prior to that, we will take a closer look at the SHAP data to better understand its statistical characteristics as well as applications wrt mechanistic explanation/exploration.
+________________________
+
+First, let's examine one of my favorite use cases: stratified means tests for exploratory hypothesis testing via tables and 3D/4D visualizations.
+For stratification, we will go with the Halogen and Halide groupings that Doyle et all tested by adding them to the SHAP data as categorical variables.
+For diagnostic purposes, we'll conclude this by quantifying the differentiating effect of these categoricals by evaluating their marginal effect in a LR task.
+___________________
+
+First, we set up the data to include the Halide and Halogen stratification variables.
+
+```{r - setup data for stratified means tests}
+
+# generate indices for halogens
+ArCl <- seq(1, nrow(output.table), by=3)
+ArBr <- seq(2, nrow(output.table), by=3)
+ArI <- seq(3, nrow(output.table), by=3)
+
+# generate indices for halides
+CF3.Cl <- seq(1, nrow(output.table), by=15)
+CF3.Br <- seq(2, nrow(output.table), by=15)
+CF3.I <- seq(3, nrow(output.table), by=15)
+OMe.Cl <- seq(4, nrow(output.table), by=15)
+OMe.Br <- seq(5, nrow(output.table), by=15)
+OMe.I <- seq(6, nrow(output.table), by=15)
+Et.Cl <- seq(7, nrow(output.table), by=15)
+Et.Br <- seq(8, nrow(output.table), by=15)
+Et.I <- seq(9, nrow(output.table), by=15)
+pyr2.Cl <- seq(10, nrow(output.table), by=15)
+pyr2.Br <- seq(11, nrow(output.table), by=15)
+pyr2.I <- seq(12, nrow(output.table), by=15)
+pyr3.Cl <- seq(13, nrow(output.table), by=15)
+pyr3.Br <- seq(14, nrow(output.table), by=15)
+pyr3.I <- seq(15, nrow(output.table), by=15)
+
+# define new table
+nominal.table.labeled <- output.table
+
+# create new nominal table with labels
+nominal.table.labeled[ArCl, Halogen := "ArCl"]
+nominal.table.labeled[ArBr, Halogen := "ArBr"]
+nominal.table.labeled[ArI, Halogen := "ArI"]
+
+# add halides
+nominal.table.labeled[CF3.Cl, Halide := "CF3.Cl"]
+nominal.table.labeled[CF3.Br, Halide := "CF3.Br"]
+nominal.table.labeled[CF3.I, Halide := "CF3.I"]
+nominal.table.labeled[OMe.Cl, Halide := "OMe.Cl"]
+nominal.table.labeled[OMe.Br, Halide := "OMe.Br"]
+nominal.table.labeled[OMe.I, Halide := "OMe.I"]
+nominal.table.labeled[Et.Cl, Halide := "Et.Cl"]
+nominal.table.labeled[Et.Br, Halide := "Et.Br"]
+nominal.table.labeled[Et.I, Halide := "Et.I"]
+nominal.table.labeled[pyr2.Cl, Halide := "pyr2.Cl"]
+nominal.table.labeled[pyr2.Br, Halide := "pyr2.Br"]
+nominal.table.labeled[pyr2.I, Halide := "pyr2.I"]
+nominal.table.labeled[pyr3.Cl, Halide := "pyr3.Cl"]
+nominal.table.labeled[pyr3.Br, Halide := "pyr3.Br"]
+nominal.table.labeled[pyr3.I, Halide := "pyr3.I"]
+
+# add yield
+nominal.table.labeled <- cbind(yield_label, nominal.table.labeled)
+
+# drop yield is na
+nominal.table.labeled <- nominal.table.labeled[!is.na(yield_data)]
+
+# separate into test and training
+labeled.test <- nominal.table.labeled[-training,]
+labeled.training <- nominal.table.labeled[training,]
+
+# confirm equivalence
+XGB_model_1.10.SHAP$shap_score %>% nrow() == labeled.training %>% nrow() 
+# [1] TRUE
+
+# add labels to SHAP
+XGB_model_1.10.SHAP$shap_score[, Halogen := labeled.training$Halogen]
+XGB_model_1.10.SHAP$shap_score[, Halide := labeled.training$Halide]
+
+```
+
+Let's do means test to evaluate differences between chemical groups wrt SHAP-estimated feature effects.
+
+```{r - execute stratified means tests}
+
+# create indices for test variables
+means_indx <- XGB_model_1.10.SHAP$shap_score[, 1:ncol(XGB_model_1.10.SHAP$shap_score)] %>% names()
+
+# setup and execute stats tables
+XGB_model_1.10.SHAP.Means <- CreateTableOne(vars = means_indx, 
+                                            strata = "Halogen" , 
+                                            data = XGB_model_1.10.SHAP$shap_score)
+#extract data matrix
+XGB_model_1.10.SHAP.Means <- print(XGB_model_1.10.SHAP.Means$ContTable, smd=TRUE, quote = FALSE, noSpaces = TRUE) 
+
+#clean up and convert to data table
+colnames(XGB_model_1.10.SHAP.Means) <- paste0(colnames(XGB_model_1.10.SHAP.Means), " (n=", as.numeric(XGB_model_1.10.SHAP.Means[1,]), ")")
+colnames(XGB_model_1.10.SHAP.Means) <- c(colnames(XGB_model_1.10.SHAP.Means)[1:3], "p", "test", "SMD")
+XGB_model_1.10.SHAP.Means <- XGB_model_1.10.SHAP.Means[-1,]
+XGB_model_1.10.SHAP.Means <- XGB_model_1.10.SHAP.Means %>% as.data.table(keep.rownames = TRUE)
+
+# drop parentheticals
+XGB_model_1.10.SHAP.Means[, 1:4 := lapply(.SD, function(x){tstrsplit(x=x, split=" ", fixed=TRUE, keep = 1L) %>% unlist() }), .SDcols=1:4]
+# drop text column
+XGB_model_1.10.SHAP.Means[, test := NULL]
+# convert to numeric
+XGB_model_1.10.SHAP.Means[, 2:6 := lapply(.SD, as.numeric), .SDcols=2:6]
+# fix NA and NaN
+XGB_model_1.10.SHAP.Means[is.nan(p), p := 999]
+XGB_model_1.10.SHAP.Means[is.na(p), p := -0.001]
+XGB_model_1.10.SHAP.Means[is.na(SMD), SMD := -0.001]
+
+
+
+#view
+(XGB_model_1.10.SHAP.Means)
+
+```
+Take a moment to consider what has just been done: a "black box" model (XGBoost) was used to generate an effect matrix of "white box" models for each individual case.
+This effect matrix was then used as a "synthetic data" for the purpose of predicting reaction yields -- and here now, for exploratory hypothesis testing via stratified means tests.
+_______
+Let's now chart:
+mean(SHAP) vs corr(SHAPvYield) vs SMD(ArCl vs ArBr vs ArIx)
+
+```{r - feature impact chart}
+
+## data required for chart
+# SHAP SMD
+# XGB_model_1.10.SHAP.Means$SMD
+# SHAM mean score
+# XGB_model_1.10.SHAP$mean_shap_score
+# SHAP vs Yield Correclations
+sapply(1:(ncol(XGB_model_1.10.SHAP$shap_score)-2), function(i){
+  c(names(XGB_model_1.10.SHAP$shap_score)[[i]],
+    cor(as.matrix(training.nominal[, 1]), XGB_model_1.10.SHAP$shap_score[[i]]))
+}) %>% t() %>% as.data.table() %>%
+  setnames(c("rn", "corr")) %>%
+  .[, "corr" := as.numeric(corr)] -> XGB_model_1.10.SHAP.Corr2
+
+# merge data sets for plot
+XGB_model_1.10.SHAP$mean_shap_score %>% 
+  as.data.table(keep.rownames = TRUE) %>% setnames(c("rn", "SHAP")) %>% setorder(rn) %>%
+  .[XGB_model_1.10.SHAP.Corr2, on="rn"] %>%
+  .[XGB_model_1.10.SHAP.Means[, c("rn", "SMD")], on="rn"] -> XGB_model_1.10.SHAP.Diagnostics
+
+# generate plot
+XGB_model_1.10.SHAP.Diagnostics %>%
+  #.[SMD > .5] %>%
+  ggplot(aes(x=SHAP, y=corr, size=SMD, colors = rn)) +
+    geom_point(alpha=0.5) +
+    scale_size(range = c(.1, 24), name="Geometric") -> XGB_model_1.10.SHAP.Diagnostics.Plot
+
+ggplotly(XGB_model_1.10.SHAP.Diagnostics.Plot)
+
+```
+
+x: SHAP - mean SHAP-estimated feature effect
+y: corr - correlation between Yield and SHAP-estimated feature effect
+w (bubble size): standardized difference between I-Br-Cl strata wrt SHAP-estimated feature effects
+* SMD is a unitless measure of standard deviations; it controls for scale, therefore providing a global picture of discriminatory relevance wrt each feature
+
+____________________
+
+Next (as done by Doyle et al) we construct and compare Halogen-specific models wrt binary prediction.
+_____________________
+
+First, the data is prepared...
+
+```{r - data for stratification test}
+# create training/test data; separate by chloride, bromide, iodide
+labeled.training.stratified <- nominal.table.labeled[training,]
+labeled.test.stratified <- nominal.table.labeled[-training,]
+
+# generate input data - training
+labeled.training.stratified.Cl <- labeled.training.stratified[Halogen=="ArCl"]
+labeled.training.stratified.Br <- labeled.training.stratified[Halogen=="ArBr"]
+labeled.training.stratified.Ix <- labeled.training.stratified[Halogen=="ArI"]
+
+# generate input data - test
+labeled.test.stratified.Cl <- labeled.test.stratified[Halogen=="ArCl"]
+labeled.test.stratified.Br <- labeled.test.stratified[Halogen=="ArBr"]
+labeled.test.stratified.Ix <- labeled.test.stratified[Halogen=="ArI"]
+```
+
+Next, our models are executed and saved...
+
+```{r - models for stratification test, include=FALSE}
+# 3 XGBoost models
+#Cl
+XGB_model_1.11_stratified.Cl <- xgboost::xgboost(data = labeled.training.stratified.Cl[, 5:(ncol(labeled.training.stratified.Cl)-2)] %>% as.matrix(),
+                                                 label = labeled.training.stratified.Cl[,4] %>% as.matrix(),
+                                                 params = XGB_model_1_params, 
+                                                 nrounds = nrounds, ## nrounds either default or adjusted to CV results
+                                                 early_stopping_rounds = 10)
+#Br
+XGB_model_1.11_stratified.Br <- xgboost::xgboost(data = labeled.training.stratified.Br[, 5:(ncol(labeled.training.stratified.Br)-2)] %>% as.matrix(),
+                                                 label = labeled.training.stratified.Br[,4] %>% as.matrix(),
+                                                 params = XGB_model_1_params, 
+                                                 nrounds = nrounds, ## nrounds either default or adjusted to CV results
+                                                 early_stopping_rounds = 10)
+
+#I
+XGB_model_1.11_stratified.Ix <- xgboost::xgboost(data = labeled.training.stratified.Ix[, 5:(ncol(labeled.training.stratified.Ix)-2)] %>% as.matrix(),
+                                                 label = labeled.training.stratified.Ix[,4] %>% as.matrix(),
+                                                 params = XGB_model_1_params, 
+                                                 nrounds = nrounds, ## nrounds either default or adjusted to CV results
+                                                 early_stopping_rounds = 10)
+
+#save
+xgb.save(XGB_model_1.11_stratified.Cl, "XGB_model_1.11_stratified.Cl.model")
+xgb.save(XGB_model_1.11_stratified.Br, "XGB_model_1.11_stratified.Br.model")
+xgb.save(XGB_model_1.11_stratified.Ix, "XGB_model_1.11_stratified.Ix.model")
+```
+
+Then, OOS performance is evaluated for each.
+
+```{r - evaluations for stratification test}
+
+# generate diagnostic predictions for training data
+#Cl
+XGB_model_1.11_stratified.Cl.Predict.Test <- xgboost:::predict.xgb.Booster(XGB_model_1.11_stratified.Cl, 
+                                                                           labeled.test.stratified.Cl[, 5:(ncol(labeled.test.stratified.Cl)-2)] %>% as.matrix())
+#Br
+XGB_model_1.11_stratified.Br.Predict.Test <- xgboost:::predict.xgb.Booster(XGB_model_1.11_stratified.Br, 
+                                                                           labeled.test.stratified.Br[, 5:(ncol(labeled.test.stratified.Br)-2)] %>% as.matrix())
+#Ix
+XGB_model_1.11_stratified.Ix.Predict.Test <- xgboost:::predict.xgb.Booster(XGB_model_1.11_stratified.Ix, 
+                                                                           labeled.test.stratified.Ix[, 5:(ncol(labeled.test.stratified.Ix)-2)] %>% as.matrix())
+
+# model AUC
+#Cl
+plot(pROC::roc(predictor = XGB_model_1.11_stratified.Cl.Predict.Test,
+               response = labeled.test.stratified.Cl[,4] %>% as.matrix(),
+               levels=c(0, 1)),
+     lwd=1.5,
+     auc.polygon=TRUE,
+     print.auc=TRUE) 
+#Br
+plot(pROC::roc(predictor = XGB_model_1.11_stratified.Br.Predict.Test,
+               response = labeled.test.stratified.Br[,4] %>% as.matrix(),
+               levels=c(0, 1)),
+     lwd=1.5,
+     auc.polygon=TRUE,
+     print.auc=TRUE) 
+#Ix
+plot(pROC::roc(predictor = XGB_model_1.11_stratified.Ix.Predict.Test,
+               response = labeled.test.stratified.Ix[,4] %>% as.matrix(),
+               levels=c(0, 1)),
+     lwd=1.5,
+     auc.polygon=TRUE,
+     print.auc=TRUE) 
+
+
+```
+
+Once again, OOS AUC is absurdly high -- with no special tuning or tweaking of parameters.
+___________________________
+
+Next, we generate the SHAP effect matrices and evaluate classification performance.
+
+```{r - shap generation and evaluation for halogen-stratified test}
+# generate SHAP model
+#Cl
+XGB_model_1.11_stratified.Cl.SHAP <- shap.values(xgb_model = XGB_model_1.11_stratified.Cl, 
+                                                 X_train = labeled.test.stratified.Cl[, 5:(ncol(labeled.test.stratified.Cl)-2)] %>% as.matrix())
+#Br
+XGB_model_1.11_stratified.Br.SHAP <- shap.values(xgb_model = XGB_model_1.11_stratified.Br, 
+                                                 X_train = labeled.test.stratified.Br[, 5:(ncol(labeled.test.stratified.Br)-2)] %>% as.matrix())
+#Ix
+XGB_model_1.11_stratified.Ix.SHAP <- shap.values(xgb_model = XGB_model_1.11_stratified.Ix, 
+                                                 X_train = labeled.test.stratified.Ix[, 5:(ncol(labeled.test.stratified.Ix)-2)] %>% as.matrix())
+
+# eval classification performance
+# generate prediction
+#Cl
+XGB_model_1.11_stratified.Cl.SHAP.Bin <- rowSums(XGB_model_1.11_stratified.Cl.SHAP$shap_score) ## generate prediction
+XGB_model_1.11_stratified.Cl.SHAP.Bin <- ifelse(XGB_model_1.11_stratified.Cl.SHAP.Bin < 0, "YieldInsig", "YieldPositive") %>% factor()
+XGB_model_1.11_stratified.Cl.SHAP.Eval <- caret::confusionMatrix(XGB_model_1.11_stratified.Cl.SHAP.Bin, 
+                                                                 labeled.test.stratified.Cl[, 4] %>% as.matrix() %>% factor(labels = c("YieldInsig", "YieldPositive")), positive = "YieldPositive")
+#Br
+XGB_model_1.11_stratified.Br.SHAP.Bin <- rowSums(XGB_model_1.11_stratified.Br.SHAP$shap_score) ## generate prediction
+XGB_model_1.11_stratified.Br.SHAP.Bin <- ifelse(XGB_model_1.11_stratified.Br.SHAP.Bin < 0, "YieldInsig", "YieldPositive") %>% factor()
+XGB_model_1.11_stratified.Br.SHAP.Eval <- caret::confusionMatrix(XGB_model_1.11_stratified.Br.SHAP.Bin, 
+                                                                 labeled.test.stratified.Br[, 4] %>% as.matrix() %>% factor(labels = c("YieldInsig", "YieldPositive")), positive = "YieldPositive")
+#Ix
+XGB_model_1.11_stratified.Ix.SHAP.Bin <- rowSums(XGB_model_1.11_stratified.Ix.SHAP$shap_score) ## generate prediction
+XGB_model_1.11_stratified.Ix.SHAP.Bin <- ifelse(XGB_model_1.11_stratified.Ix.SHAP.Bin < 0, "YieldInsig", "YieldPositive") %>% factor()
+XGB_model_1.11_stratified.Ix.SHAP.Eval <- caret::confusionMatrix(XGB_model_1.11_stratified.Ix.SHAP.Bin, 
+                                                                 labeled.test.stratified.Ix[, 4] %>% as.matrix() %>% factor(labels = c("YieldInsig", "YieldPositive")), positive = "YieldPositive")
+
+#view
+#Cl
+(XGB_model_1.11_stratified.Cl.SHAP.Eval)
+#Br
+(XGB_model_1.11_stratified.Br.SHAP.Eval)
+#Ix
+(XGB_model_1.11_stratified.Ix.SHAP.Eval)
+
+```
+
+OOS classification results are moderately impressive, with balanced accuracy in the 86-91% range.
+
+```{r shap effect visualization for halogen-stratified test}
+# generate SHAP visualization
+#Cl
+shap.plot.summary.wrap2(shap_score = XGB_model_1.11_stratified.Cl.SHAP$shap_score,
+                        X = labeled.test.stratified.Cl[, 5:(ncol(labeled.test.stratified.Cl)-2)] %>% as.matrix(),
+                        top_n = 20)
+#Br
+shap.plot.summary.wrap2(shap_score = XGB_model_1.11_stratified.Br.SHAP$shap_score,
+                        X = labeled.test.stratified.Br[, 5:(ncol(labeled.test.stratified.Br)-2)] %>% as.matrix(),
+                        top_n = 20)
+#Ix
+shap.plot.summary.wrap2(shap_score = XGB_model_1.11_stratified.Ix.SHAP$shap_score,
+                        X = labeled.test.stratified.Ix[, 5:(ncol(labeled.test.stratified.Ix)-2)] %>% as.matrix(),
+                        top_n = 20)
+
+```
+Quick visualization shows meaningful differences between Halogens wrt feature effects driving classification.
+_________________
+
+Next, we will explore this more directly...
+
+```{r - 3D differential graph of SHAP effect}
+
+#2. Cl, I, Br: SHAP vs SHAP vs SHAP - color=sig: IvCl, IvBr, ClvBr, All
+
+# generate merged data set
+rbind(XGB_model_1.11_stratified.Cl.SHAP$shap_score[, "Halogen" := "ArCl"],
+      XGB_model_1.11_stratified.Br.SHAP$shap_score[, "Halogen" := "ArBr"],
+      XGB_model_1.11_stratified.Ix.SHAP$shap_score[, "Halogen" := "ArIx"]) -> XGB_model_1.11_stratified.SHAP2
+
+# generate means test table
+# create indices for test variables
+means_indx <-XGB_model_1.11_stratified.SHAP2[, 1:(ncol(XGB_model_1.11_stratified.SHAP2)-1)] %>% names()
+
+# setup and execute stats tables
+XGB_model_1.11_stratified.SHAP.Means <- CreateTableOne(vars = means_indx, 
+                                                       strata = "Halogen" , 
+                                                       data = XGB_model_1.11_stratified.SHAP2)
+#extract data matrix
+XGB_model_1.11_stratified.SHAP.Means <- print(XGB_model_1.11_stratified.SHAP.Means$ContTable, smd=TRUE, quote = FALSE, noSpaces = TRUE) 
+
+#clean up and convert to data table
+colnames(XGB_model_1.11_stratified.SHAP.Means) <- paste0(colnames(XGB_model_1.11_stratified.SHAP.Means), " (n=", as.numeric(XGB_model_1.11_stratified.SHAP.Means[1,]), ")")
+colnames(XGB_model_1.11_stratified.SHAP.Means) <- c(colnames(XGB_model_1.11_stratified.SHAP.Means)[1:3], "p", "test", "SMD")
+XGB_model_1.11_stratified.SHAP.Means <- XGB_model_1.11_stratified.SHAP.Means[-1,]
+XGB_model_1.11_stratified.SHAP.Means <- XGB_model_1.11_stratified.SHAP.Means %>% as.data.table(keep.rownames = TRUE)
+
+# drop parentheticals
+XGB_model_1.11_stratified.SHAP.Means[, 1:4 := lapply(.SD, function(x){tstrsplit(x=x, split=" ", fixed=TRUE, keep = 1L) %>% unlist() }), .SDcols=1:4]
+# drop text column
+XGB_model_1.11_stratified.SHAP.Means[, test := NULL]
+# convert to numeric
+XGB_model_1.11_stratified.SHAP.Means[, 2:6 := lapply(.SD, as.numeric), .SDcols=2:6]
+# fix NA and NaN
+XGB_model_1.11_stratified.SHAP.Means[is.nan(p), p := 999]
+XGB_model_1.11_stratified.SHAP.Means[is.na(p), p := -0.001]
+XGB_model_1.11_stratified.SHAP.Means[is.na(SMD), SMD := -0.001]
+
+## now do charts
+XGB_model_1.11_stratified.SHAP.Means %>%
+  plot_ly(x= ~`ArBr (n=404)`, 
+          y= ~`ArIx (n=374)`, 
+          z= ~`ArCl (n=409)`, 
+          sizemode='area', size= ~SMD*SMD, #sizeref=.001,
+          color= ~SMD, colorscale = 'Viridis',
+          type='scatter3d', mode='markers', 
+          hoverinfo = 'text',
+          text = ~paste(rn, '</br></br>',
+                        "ArBr=", `ArBr (n=404)`, " (Δlog-RR)", '</br>',
+                        "ArIx=", `ArIx (n=374)`, " (Δlog-RR)", '</br>',
+                        "ArCl=", `ArCl (n=409)`, " (Δlog-RR)", '</br>',
+                        "SMD=", SMD))
+
+
+
+```
+
+Here, SMD is presented as both bubble size and color: the larger the size and more intense the color, the larger the significance of differences.
+_______________
+
+Finally, a diagnostic regression to quantify the differential impact of each Halogen wrt reaction probability.
+
+```{r - LR model plus}
+
+#data
+XGB_model_1.11_stratified.SHAP.lm <- data.table(Yield = labeled.training.stratified$yield_data, 
+                                                SHAP = rowSums(XGB_model_1.10.SHAP$shap_score[, 1:(ncol(XGB_model_1.10.SHAP$shap_score)-2)]),
+                                                Halide = labeled.training.stratified$Halide,
+                                                Halogen = labeled.training.stratified$Halogen)
+
+#lm test - null
+lm(data = XGB_model_1.11_stratified.SHAP.lm, "Yield ~ SHAP") %>% summary()
+
+#lm test - Halogen
+lm(data = XGB_model_1.11_stratified.SHAP.lm, "Yield ~ SHAP+Halogen") %>% summary()
+
+#lm test - Halide
+lm(data = XGB_model_1.11_stratified.SHAP.lm, "Yield ~ SHAP+Halide") %>% summary()
+
+```
+
+Aggregate SHAP value (log-RR of reaction yield > .10) alone performs remarkably well. Even more remarkably, at this level Halogen classification has little impact on predictive performance. This changes, however, once things are broken down to the more granular Halide level: R-squared = .71, beating some ML models.
+_____________________________
+
+Summary: We have now established that that the effect matrix generated by SHAP based on a binary classification task adequately encodes the mechanistic information contained in and implied by the descriptor data. This is demonstrated via several feature effect analyses and confirmed via linear regression wrt yield. In the latter, the SHAP-derived effect matrix is shown to provide robust prediction under various scenarios, including aggregation. Based on these results, next steps will be to apply the SHAP effect matrix to the original task championed by Doyle et al -- random forest regression. Recall, that Doyle et al replaced all nominal descriptor data, with scaled (normalized) data. Doyle et al are not the only group who has found discriptor data troublesome absent normalization. Here, we now evaluate the degree to which SHAP data may potentially serve as "synthetic data" to resolve such issues.
+_____________________________
+
+RandomForest, Revisted
+First, we setup and execute the model.
+
+```{r - RandomForest(SHAP)}
+
+# we replace "training.scaled" with SHAP effect matrix generated in first run
+# setup input vars
+rfFit.y <- training.nominal[, 1] %>% as.matrix() %>% as.vector()
+rfFit.x <- XGB_model_1.10.SHAP$shap_score[, 1:(ncol(XGB_model_1.10.SHAP$shap_score)-2)] %>% as.matrix()
+
+# setup dummy
+# plotObsVsPred(extractPrediction(list(train(rfFit.y ~ ., data=rfFit.x, trControl=train_control, method="lm"))))
+
+# random forest 
+set.seed(8915)
+rfFit_SHAP <- train(y = rfFit.y, x=rfFit.x, trControl=train_control, method="rf", importance=TRUE)
+# generate and display dx plot
+png(filename="R/plots/rf_SHAP.png", width = 1000, height = 600)
+predVals <- extractPrediction(list(rfFit_SHAP))
+plotObsVsPred(predVals)
+dev.off()
+#dispaly
+magick::image_read("R/plots/rf_SHAP.png") %>% plot() 
+
+#save
+saveRDS(rfFit, "rds/rfFit_SHAP.rds")
+
+```
+
+Diagnostic chart looks promising. Lets now compare performance to prior models by Doyle et al.
+
+```{r - compare to prior modes}
+
+# generate test data for SHAP
+XGB_model_1.10.SHAP.test_data <- shap.values(xgb_model = XGB_model_1.10, X_train = as.matrix(test.nominal[, -(1:4)]))
+
+# ============================================================================
+# Read in previously trained models saved as .rds files
+# ============================================================================
+
+# Run to read in previously trained models
+knnFit <- readRDS("rds/knnFit.rds")
+#svmFit <- readRDS("rds/svmFit.rds")
+bayesglmFit <- readRDS("rds/bayesglmFit.rds")
+lmFit <- readRDS("rds/lmFit.rds")
+nnetFit.100nodes <- readRDS("rds/nnetFit_100nodes.rds")
+rfFit <- readRDS("rds/rfFit.rds")
+
+# ============================================================================
+# RMSE and R^2 plot for different machine learning models
+# ============================================================================
+
+# Predict for testing set
+# lm.pred <- predict(lmFit, test.scaled[, -(2:4)])
+# #svm.pred <- predict(svmFit, test.scaled)
+# knn.pred <- predict(knnFit, test.scaled)
+# nnet.pred <- compute(nnetFit.100nodes, test.scaled[, 4:nrow(test.scaled)])$net.result
+# bayesglm.pred <- predict(bayesglmFit, test.scaled)
+# rf.pred <- predict(rfFit, test.scaled)
+rf.pred.SHAP <- predict(rfFit_SHAP, XGB_model_1.10.SHAP.test_data$shap_score)
+
+
+# Set negative predictions to zero
+# lm.pred[lm.pred<0] <- 0
+# svm.pred[svm.pred<0] <- 0
+# knn.pred[knn.pred<0] <- 0
+# nnet.pred[nnet.pred<0] <- 0
+# bayesglm.pred[bayesglm.pred<0] <- 0
+# rf.pred[rf.pred<0] <- 0
+rf.pred.SHAP[rf.pred.SHAP<0] <- 0
+
+# R^2 values
+# lm.pred.r2 <- cor(lm.pred, test.scaled$yield)**2
+# #svm.pred.r2 <- cor(svm.pred, test.scaled$yield)**2
+# knn.pred.r2 <- cor(knn.pred, test.scaled$yield)**2
+# nnet.pred.r2 <- cor(nnet.pred, test.scaled$yield)**2
+# bayesglm.pred.r2 <- cor(bayesglm.pred, test.scaled$yield)**2
+# rf.pred.r2 <- cor(rf.pred, test.scaled$yield)**2
+rf.pred.SHAP.r2 <- cor(rf.pred.SHAP, test.nominal$yield_data)**2
+
+
+# RMSE
+# lm.pred.rmse <- rmse(lm.pred, test.scaled$yield)
+# #svm.pred.rmse <- rmse(svm.pred, test.scaled$yield)
+# knn.pred.rmse <- rmse(knn.pred, test.scaled$yield)
+# nnet.pred.rmse <- rmse(nnet.pred, test.scaled$yield)
+# bayesglm.pred.rmse <- rmse(bayesglm.pred, test.scaled$yield)
+# rf.pred.rmse <- rmse(rf.pred, test.scaled$yield)
+rf.pred.SHAP.rmse <- rmse(rf.pred.SHAP, test.nominal$yield_data)
+
+
+# Plot RMSE and R^2, dropping SVN
+df <- data.frame(rmse = c(lm.pred.rmse, knn.pred.rmse, nnet.pred.rmse, bayesglm.pred.rmse, rf.pred.rmse, rf.pred.SHAP.rmse), # svm.pred.rmse, 
+                 r2 = c(lm.pred.r2, knn.pred.r2, nnet.pred.r2, bayesglm.pred.r2, rf.pred.r2, rf.pred.SHAP.r2)) # svm.pred.r2, 
+row.names(df) <- c('Linear Model', 'kNN', 'Neural Network', 'Bayes GLM', 'Random Forest (Scaled)', "Random Forest (SHAP)") #'SVM'
+
+rmse.plot <- ggplot(df, aes(y=reorder(rownames(df), rmse), x=rmse)) +
+  geom_point() +
+  geom_text(label=round(df$rmse, 1), vjust=-1, size=3) +
+  labs(x='RMSE', y='') +
+  xlim(0,20)
+r2.plot <- ggplot(df, aes(y=reorder(rownames(df), rmse), x=r2)) +
+  geom_point() +
+  geom_text(label=round(df$r2, 2), vjust=-1, size=3) +
+  labs(x='Rsquared', y='') +
+  xlim(0.6,1)
+plots <- arrangeGrob(rmse.plot, r2.plot, ncol=2)
+ggsave(plots, file="R/plots/ml_models_SHAP.png", width=7, height=2.5)
+
+# dpslay
+magick::image_read("R/plots/ml_models_SHAP.png") %>% plot() 
+
+
+```
+
+
+Most impressively, we find that RF using the SHAP data -- which was derived from a binary predictive task -- performs almost as well as the champion RF model
+Keep in mind that the XGBoost model used to generate the SHAP data was not "tuned" for performance and the predictive objective (yield < 10%) was arbitrary.
+
+Taken together, this suggests a bright future for SHAP-derived "synthetic data".
+
+_________
+FIN
+_________
+
+Acknowledgements.
+
+_________
+PSCRIPT
+_________
+
+Given certain generous assumptions, the significance of the SHAP experiment above can be reframed as follows:
+1. Chemical descriptors generated via theoretical calculations are sufficient for mapping the associative structure of a chemical system wrt lab-measured yield.
+2. XGBoost, an automated mechanism for performing additive logistic regression on a stagewise basis, can be used to reliably predict yield on a binary basis (0,!0).
+3. Any mathematical structure (equation or matrix of equations) that reliably predicts an outcome can be reliably assumed to represent a mechanistically valid map.
+4. SHAP, which generates an additive log-likelihood model based on the deductive Shapley heuristic, maps a probabilistic hypersurface that is valid at any level of differentiation.
+5. Predictive robustness alone is insufficient to assume validity wrt all features and all feature combinations; however, this is (proven) guaranteed by the Shapley value.
+6. For each local case, SHAP encodes the full scope of associative hierarchies into a compact 1D linear structure that represents the log-RR effect of each feature wrt each local case.
+7. Ergo: the "effect matrix" generated by SHAP can be treated as an independently viable system for elucidation of synthetic mechanisms via secondary transformations and analyses.
+
+_________
+PPSCRIPT
+_________
+
+We tease this now a bit by examineb various alternative aggregations of the feature effect matrix wrt prediction of yield.
+1. We assume that negative causation is independent from and mathematically orthogonal to positive causation.
+2. We therefore, for each case, square each feature effect and sum according to its original sign -- negatives grouped with negatives, positives with positives.
+3. We then take the square root of each such sum and collect together with other intermediate/alternative metrics: 1) original SHAP sum, 2) sum of negatives, 3) sum of positives, 4) sum of negatives, 5) squared sum of negatives, 6) squared sum of positives, and 7) difference between squared sums of positives and negatives.
+4. Finally, for each of the above, we run simple regressions wrt yield and compare R-squared and RMSE.
+
+
+```{r - SHAP qubit}
+
+# First, define qubit matrix per 1-7 above
+XGB_model_1.10.SHAP.Qubit <- data.table()
+
+# SumTotal
+XGB_model_1.10.SHAP.Qubit$SumTotal <- XGB_model_1.10.SHAP$shap_score[, rowSums(.SD), .SDcols=1:(ncol(XGB_model_1.10.SHAP$shap_score)-2)] 
+
+# SumPos
+sapply(1:nrow(XGB_model_1.10.SHAP$shap_score), function(ii){
+  XGB_model_1.10.SHAP$shap_score[, 1:120][ii,.SD, .SDcols = as.vector(XGB_model_1.10.SHAP$shap_score[ii, 1:120]>0)] %>%
+    as.numeric() %>%
+    sum()
+}) -> XGB_model_1.10.SHAP.Qubit$SumPos
+
+# SumNeg
+sapply(1:nrow(XGB_model_1.10.SHAP$shap_score), function(ii){
+  XGB_model_1.10.SHAP$shap_score[, 1:120][ii,.SD, .SDcols = as.vector(XGB_model_1.10.SHAP$shap_score[ii, 1:120]<0)] %>%
+    as.numeric() %>%
+    sum()
+}) -> XGB_model_1.10.SHAP.Qubit$SumNeg
+
+# SqSumNeg
+sapply(1:nrow(XGB_model_1.10.SHAP$shap_score), function(ii){
+  XGB_model_1.10.SHAP$shap_score[, 1:120][ii,sapply(.SD, function(x){as.numeric(x)^2}), .SDcols = XGB_model_1.10.SHAP$shap_score[ii, 1:120]<0] %>%
+    sum() %>%
+    sqrt()
+}) -> XGB_model_1.10.SHAP.Qubit$SqSumNeg
+
+# SqSumPos
+sapply(1:nrow(XGB_model_1.10.SHAP$shap_score), function(ii){
+  XGB_model_1.10.SHAP$shap_score[, 1:120][ii,sapply(.SD, function(x){as.numeric(x)^2}), .SDcols = XGB_model_1.10.SHAP$shap_score[ii, 1:120]>0] %>%
+    sum() %>%
+    sqrt()
+}) -> XGB_model_1.10.SHAP.Qubit$SqSumPos
+
+# DiffSqSum
+XGB_model_1.10.SHAP.Qubit[, "DiffSqSum" := as.numeric(SqSumPos) - as.numeric(SqSumNeg)]
+
+#add yield
+XGB_model_1.10.SHAP.Qubit <- cbind(Yield = XGB_model_1.10.SHAP.Corr$Yield, XGB_model_1.10.SHAP.Qubit)
+
+#process
+XGB_model_1.10.SHAP.Qubit <- XGB_model_1.10.SHAP.Qubit[, lapply(.SD, as.numeric)]
+
+#run lm
+lm(Yield ~ SumTotal, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+lm(Yield ~ SumPos, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+lm(Yield ~ SumNeg, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+lm(Yield ~ SqSumNeg, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+lm(Yield ~ SqSumPos, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+lm(Yield ~ DiffSqSum, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+
+lm(Yield ~ ., data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+lm(Yield ~ SumTotal+DiffSqSum, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+
+
+
+
+# # Plot RMSE and R^2, dropping SVN
+# df <- data.frame(rmse = c(lm.pred.rmse, knn.pred.rmse, nnet.pred.rmse, bayesglm.pred.rmse, rf.pred.rmse, rf.pred.SHAP.rmse), # svm.pred.rmse, 
+#                  r2 = c(lm.pred.r2, knn.pred.r2, nnet.pred.r2, bayesglm.pred.r2, rf.pred.r2, rf.pred.SHAP.r2)) # svm.pred.r2, 
+# row.names(df) <- c('Linear Model', 'kNN', 'Neural Network', 'Bayes GLM', 'Random Forest (Scaled)', "Random Forest (SHAP)") #'SVM'
+# 
+# rmse.plot <- ggplot(df, aes(y=reorder(rownames(df), rmse), x=rmse)) +
+#   geom_point() +
+#   geom_text(label=round(df$rmse, 1), vjust=-1, size=3) +
+#   labs(x='RMSE', y='') +
+#   xlim(0,20)
+# r2.plot <- ggplot(df, aes(y=reorder(rownames(df), rmse), x=r2)) +
+#   geom_point() +
+#   geom_text(label=round(df$r2, 2), vjust=-1, size=3) +
+#   labs(x='Rsquared', y='') +
+#   xlim(0.6,1)
+# plots <- arrangeGrob(rmse.plot, r2.plot, ncol=2)
+# ggsave(plots, file="R/plots/ml_models_SHAP.png", width=7, height=2.5)
+# 
+# # dpslay
+# magick::image_read("R/plots/ml_models_SHAP.png") %>% plot() 
+# 
+
+
+```
+Wild. Geometric mean holds up well compared to other aggregations, but loses out to the additive mean in a straight comparison.
+Experimentation along this direction worthwhile, assuming an automated means for separating postive and negative causal structures can be identified. For example, perhaps given unknown uncertainties wrt SHAP effect esitmations (local), it might be better to determine positive or negative causal bucket based on overall aggregate score then apply uniformly to all cases
+
+_________
+PPPSCRIPT
+_________
+
+The previous note begged the question as to how one should go about performing feature-wise disaggregation. 
+Recall that the justification for such an approach is based on the way in which the Shapley value is mathematically defined:
+Every possible constellation of features is assumed to be a valid "game" and the overall system is accordingly optimized:
+Data for this optimization is provided to SHAP within the structure of the XGBoost decision tree itself, where all valid constellations and hiercharcies are tested:
+The deductive nature of the Shapely calculation (likely effect of exclusion wrt predictive outcome) guarantees that, even if a given feature or feature set is itself not meaningful wrt the (additive) predictive outcome, that the variability encoded within a given feauture column, feature set, or feature set aggregation should perform well in a linear modelling task.
+Put differently, the effect matrix produced by SHAP represents the effect (wrt a local outcome) of NOT having a given feature present -- this mode of reasoning is identical to that taught to physicians ("differntial diagnosis") and forces the model to assume that all sources of variability are reflected within the data. As a result, the imputed local effect of a feature with low-but-consistent predictive power will incorporate all known/unknown sources of variability impacting the prediction upon which the marginal effect calculation is based.
+
+This was hinted when we showed that the aggregate SHAP score alone performed just as well as the top 20 features wrt yield prediction. Lets now rerun that analysis per the above.
+
+Luckily, Doyle et al make this task easier (operationally) by having added clear labels to each of the 120 features included in this data set... yay!
+
+
+```{r - featurewise disaggregation test for SHAP}
+#create aggregate SHAP cols
+XGB_model_1.10.SHAP$shap_score[, "additive" := rowSums(.SD), .SDcols = names(XGB_model_1.10.SHAP$shap_score) %like% "additive_" ]
+XGB_model_1.10.SHAP$shap_score[, "aryl_halide" := rowSums(.SD), .SDcols = names(XGB_model_1.10.SHAP$shap_score) %like% "aryl_halide_" ]
+XGB_model_1.10.SHAP$shap_score[, "base" := rowSums(.SD), .SDcols = names(XGB_model_1.10.SHAP$shap_score) %like% "base_" ]
+XGB_model_1.10.SHAP$shap_score[, "ligand" := rowSums(.SD), .SDcols = names(XGB_model_1.10.SHAP$shap_score) %like% "ligand_" ]
+
+#build dataset for testing
+XGB_model_1.10.SHAP.Qubit[, c("additive", "aryl_halide", "base", "ligand") := XGB_model_1.10.SHAP$shap_score[, c("additive", "aryl_halide", "base", "ligand")]]
+
+#run linear models, one for each, one for all, and sumtotal too
+lm(Yield ~ additive, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+lm(Yield ~ aryl_halide, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+lm(Yield ~ base, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+lm(Yield ~ ligand, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+
+lm(Yield ~ additive+aryl_halide+base+ligand, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+
+lm(Yield ~ SumTotal, data = XGB_model_1.10.SHAP.Qubit) %>% summary()
+
+
+```
+While I do not yet have the background to comment on the meaning of the individual models, comparision of the all-inclusive model to the base model reveals overall predictive power to be identifical wrt Yield. Each aggregated feature set is statistically significant, in both individual and all-inclusive models, providing evidence to support prior statments wrt SHAP and the implications of how the Shapley value is defined/calculated wrt expected relationship between hierarchical predictive structure in the XGBoost model and SHAP encoding of such.
+
