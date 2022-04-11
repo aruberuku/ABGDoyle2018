@@ -5,6 +5,6 @@ SHAP was found to allow for analyses suggestive of statistical effects (associat
 
 ![image](https://user-images.githubusercontent.com/18650337/162850023-360d6c7a-fff4-4490-87c8-66a892c6927c.png)
 
-Coded completely in R, which published link below.
+Coded completely in R, with published link below.
 
 https://rpubs.com/aruberutou/803226
